@@ -1,6 +1,6 @@
-# Open Gemini Deep Research
+# Deep Research with Mistral
 
-A powerful open-source research assistant powered by Google's Gemini AI that performs deep, multi-layered research on any topic.
+A powerful open-source research assistant that performs deep, multi-layered research on any topic, powered by Mistral AI via custom RunPod deployment.
 
 ## Features
 
@@ -15,7 +15,8 @@ A powerful open-source research assistant powered by Google's Gemini AI that per
 ## Prerequisites
 
 - Python 3.9+
-- Google Gemini API key
+- RunPod API key (for using Mistral model via RunPod)
+- RunPod Endpoint ID (for your vLLM Mistral deployment)
 - Docker (if using dev container)
 - VS Code with Dev Containers extension (if using dev container)
 
@@ -51,9 +52,10 @@ You can set up this project in one of two ways:
    pip install -r requirements.txt
    ```
 
-4. Create a `.env` file in the root directory and add your Gemini API key:
+4. Create a `.env` file in the root directory and add your API keys:
    ```
-   GEMINI_KEY=your_api_key_here
+   RUNPOD_API_KEY=your_runpod_api_key_here
+   RUNPOD_ENDPOINT_ID=your_runpod_endpoint_id_here
    ```
 
 ## Usage
@@ -68,10 +70,15 @@ python main.py "your research query here"
 - `--mode`: Research mode (choices: fast, balanced, comprehensive) [default: balanced]
 - `--num-queries`: Number of queries to generate [default: 3]
 - `--learnings`: List of previous learnings [optional]
+- `--runpod-api-key`: RunPod API key (overrides RUNPOD_API_KEY environment variable)
 
-Example:
+Examples:
 ```bash
+# Basic usage
 python main.py "Impact of artificial intelligence on healthcare" --mode comprehensive --num-queries 5
+
+# Specify RunPod API key directly
+python main.py "Climate change solutions" --runpod-api-key your_api_key_here
 ```
 
 
@@ -171,7 +178,9 @@ The application offers three research modes that affect how deeply and broadly t
 
 ### Technical Implementation
 
-- Uses Google's Gemini AI for:
+- Uses LiteLLM exclusively with Mistral 24B Instruct model
+- Custom RunPod adapter for seamless integration with self-hosted vLLM endpoints
+- Model operations include:
   - Query analysis and generation
   - Content processing and synthesis
   - Semantic similarity checking

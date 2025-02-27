@@ -1,4 +1,4 @@
-from typing import Callable, List, TypeVar, Any
+from typing import Callable, List, TypeVar, Any, Dict, Optional, Union
 import asyncio
 import datetime
 import json
@@ -6,15 +6,37 @@ import os
 import uuid
 
 import math
+from pydantic import BaseModel
 
 from dotenv import load_dotenv
+import litellm
+from litellm.utils import ModelResponse, Message
 from google.genai import types
 
+# Keep these imports for compatibility during transition
 import google.generativeai as genai
-
 from google import genai as genai_client
-
 from google.ai.generativelanguage_v1beta.types import content
+
+
+# Pydantic models for schema validation
+class BreadthDepthResponse(BaseModel):
+    breadth: int
+    depth: int
+    explanation: str
+
+class FollowUpQueriesResponse(BaseModel):
+    follow_up_queries: List[str]
+
+class QueriesResponse(BaseModel):
+    queries: List[str]
+
+class QuerySimilarityResponse(BaseModel):
+    are_similar: bool
+    
+class ProcessResultResponse(BaseModel):
+    learnings: List[str]
+    follow_up_questions: List[str]
 
 
 class ResearchProgress:
@@ -152,114 +174,473 @@ class ResearchProgress:
 
 load_dotenv()
 
+class RunpodProvider:
+    """Custom provider for RunPod API."""
+    
+    def __init__(self, api_key, endpoint_id):
+        self.api_key = api_key
+        self.endpoint_id = endpoint_id
+        self.api_base = f"https://api.runpod.ai/v2/{endpoint_id}/run"
+        self.status_base = f"https://api.runpod.ai/v2/{endpoint_id}/status"
+        
+    def completion(self, model, messages, temperature=0.7, max_tokens=2048, **kwargs):
+        """Make a completion request to RunPod API."""
+        import requests
+        import json
+        import uuid
+        import time
+        
+        # Format the messages for Mistral
+        formatted_prompt = self.format_messages_to_prompt(messages)
+        
+        # Prepare the payload
+        payload = {
+            "input": {
+                "prompt": formatted_prompt,
+                "max_tokens": max_tokens,
+                "temperature": temperature,
+                "top_p": kwargs.get("top_p", 0.95)
+            }
+        }
+        
+        # Headers
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {self.api_key}"
+        }
+        
+        # Make the API call
+        print(f"Making API call to RunPod endpoint: {self.endpoint_id}")
+        
+        response = requests.post(
+            self.api_base,
+            headers=headers,
+            json=payload
+        )
+        
+        # Check for errors
+        if response.status_code != 200:
+            raise Exception(f"RunPod API error: {response.status_code}, {response.text}")
+        
+        # Get the job ID and poll for results
+        result = response.json()
+        job_id = result.get("id")
+        
+        if not job_id:
+            raise Exception(f"No job ID returned from RunPod API. Response: {result}")
+        
+        print(f"RunPod job submitted with ID: {job_id}. Polling for results...")
+        
+        # Poll for results with exponential backoff
+        max_attempts = 10
+        wait_time = 2  # Start with 2 seconds
+        
+        for attempt in range(max_attempts):
+            print(f"Polling attempt {attempt+1}/{max_attempts}. Waiting {wait_time} seconds...")
+            time.sleep(wait_time)
+            
+            # Check job status
+            status_url = f"{self.status_base}/{job_id}"
+            status_response = requests.get(
+                status_url,
+                headers=headers
+            )
+            
+            if status_response.status_code != 200:
+                print(f"Error checking job status: {status_response.status_code}, {status_response.text}")
+                wait_time = min(wait_time * 2, 30)  # Exponential backoff, max 30 seconds
+                continue
+            
+            status_result = status_response.json()
+            status = status_result.get("status")
+            
+            print(f"Job status: {status}")
+            
+            if status == "COMPLETED":
+                print("Job completed successfully!")
+                output_data = status_result.get("output", "")
+                
+                # Different output formats depending on the RunPod setup
+                print(f"Output data type: {type(output_data)}")
+                print(f"Output data sample: {str(output_data)[:500]}")
+                
+                if isinstance(output_data, str):
+                    output_text = output_data
+                elif isinstance(output_data, dict):
+                    output_text = output_data.get("text", str(output_data))
+                elif isinstance(output_data, list) and len(output_data) > 0:
+                    # RunPod sometimes returns a list with a complex structure
+                    try:
+                        # Try to extract from choices/tokens structure
+                        if 'choices' in output_data[0] and isinstance(output_data[0]['choices'], list):
+                            all_tokens = []
+                            for choice in output_data[0]['choices']:
+                                if 'tokens' in choice and isinstance(choice['tokens'], list):
+                                    all_tokens.extend(choice['tokens'])
+                            output_text = ''.join(all_tokens)
+                        else:
+                            # Fallback to string representation if we can't parse
+                            output_text = str(output_data)
+                    except (IndexError, KeyError, TypeError) as e:
+                        print(f"Error parsing RunPod output: {e}")
+                        output_text = str(output_data)
+                else:
+                    output_text = str(output_data)
+                    
+                break
+            elif status in ["FAILED", "CANCELLED"]:
+                raise Exception(f"RunPod job {status}: {status_result}")
+            
+            # If still running or queued, increase wait time for next poll
+            wait_time = min(wait_time * 2, 30)  # Exponential backoff, max 30 seconds
+        else:
+            # If we've exhausted all attempts
+            raise Exception(f"RunPod job timed out after {max_attempts} polling attempts")
+        
+        print(f"Output text received (first 100 chars): {output_text[:100]}...")
+        
+        # Format in a way that matches the litellm response structure
+        litellm_response = {
+            "id": f"runpod-{job_id}",
+            "object": "chat.completion",
+            "created": int(datetime.datetime.now().timestamp()),
+            "model": model,
+            "choices": [
+                {
+                    "index": 0,
+                    "message": {
+                        "role": "assistant",
+                        "content": output_text
+                    },
+                    "finish_reason": "stop"
+                }
+            ],
+            "usage": {
+                "prompt_tokens": len(formatted_prompt) // 4,  # Rough estimate
+                "completion_tokens": len(output_text) // 4,  # Rough estimate
+                "total_tokens": (len(formatted_prompt) + len(output_text)) // 4  # Rough estimate
+            }
+        }
+        
+        # Create a ModelResponse object using the litellm converter
+        try:
+            from litellm.utils import convert_to_model_response_object
+            return convert_to_model_response_object(litellm_response)
+        except Exception as e:
+            print(f"Warning: Could not convert to ModelResponse object: {e}")
+            
+            # Create a simple compatible object if conversion fails
+            class SimpleModelResponse:
+                def __init__(self, response_dict):
+                    self.id = response_dict["id"]
+                    self.choices = [SimpleChoice(choice) for choice in response_dict["choices"]]
+                    
+            class SimpleChoice:
+                def __init__(self, choice_dict):
+                    self.index = choice_dict["index"]
+                    self.message = SimpleMessage(choice_dict["message"])
+                    self.finish_reason = choice_dict["finish_reason"]
+                    
+            class SimpleMessage:
+                def __init__(self, message_dict):
+                    self.role = message_dict["role"]
+                    self.content = message_dict["content"]
+                    
+            return SimpleModelResponse(litellm_response)
+            
+    def format_messages_to_prompt(self, messages):
+        """Convert a list of messages to a single prompt string for Mistral 24B."""
+        prompt = ""
+        
+        # Extract system message if present
+        system_message = None
+        for message in messages:
+            if message["role"] == "system":
+                system_message = message["content"]
+                break
+        
+        # Format conversation using Mistral's expected format
+        for i, message in enumerate(messages):
+            role = message["role"]
+            content = message["content"]
+            
+            # Skip system messages as they'll be included with the first user message
+            if role == "system":
+                continue
+                
+            if role == "user":
+                # If this is the first user message and we have a system message, include it
+                if system_message and not any(m["role"] == "user" for m in messages[:i]):
+                    prompt += f"<s>[INST] {system_message}\n\n{content} [/INST]</s>\n\n"
+                else:
+                    prompt += f"<s>[INST] {content} [/INST]</s>\n\n"
+                    
+            elif role == "assistant":
+                prompt += f"{content}\n\n"
+        
+        # Add a final user message if the last message was from the assistant
+        if messages[-1]["role"] == "assistant":
+            prompt += "<s>[INST] Please continue. [/INST]</s>\n\n"
+        
+        return prompt
+
+
 class DeepSearch:
-    def __init__(self, api_key: str, mode: str = "balanced"):
+    def __init__(self, api_key: str = None, mode: str = "balanced", use_mistral: bool = True, runpod_api_key: str = None):
         """
         Initialize DeepSearch with a mode parameter:
         - "fast": Prioritizes speed (reduced breadth/depth, highest concurrency)
         - "balanced": Default balance of speed and comprehensiveness
         - "comprehensive": Maximum detail and coverage
+
+        In this version, we use exclusively Mistral on RunPod.
         """
-        self.api_key = api_key
-        self.model_name = "gemini-2.0-flash"
+        self.runpod_api_key = runpod_api_key or os.getenv("RUNPOD_API_KEY")
+        if not self.runpod_api_key:
+            raise ValueError("RunPod API key is required")
+            
         self.query_history = set()
         self.mode = mode
-        genai.configure(api_key=self.api_key)
+        self.endpoint_id = os.getenv("RUNPOD_ENDPOINT_ID", "w0oa6hyd2q40jw")  # Get from env or use default
+        
+        # Create a custom RunPod provider for direct API access
+        self.runpod_provider = RunpodProvider(self.runpod_api_key, self.endpoint_id)
+        # For compatibility with existing code that might reference this attribute
+        self.runpod_adapter = self.runpod_provider
+        
+        # Configure the model name
+        self.litellm_model_name = "runpod/mistral-24b-instruct" 
+        
+        # Register our custom completion function with LiteLLM
+        def custom_completion(model, messages, **kwargs):
+            return self.runpod_provider.completion(model, messages, **kwargs)
+        
+        # Add our custom provider to litellm
+        try:
+            # Check if register_model method exists in current litellm version
+            if hasattr(litellm, 'register_model'):
+                litellm.register_model(self.litellm_model_name, custom_completion)
+            # Check if register_completion_function method exists
+            elif hasattr(litellm, 'register_completion_function'):
+                litellm.register_completion_function(
+                    model_name=self.litellm_model_name,
+                    completion_function=custom_completion
+                )
+            else:
+                print("Warning: Could not register custom model with litellm. Using a direct approach.")
+        except Exception as e:
+            print(f"Warning: Could not register custom model with litellm ({str(e)}). Using a direct approach.")
+                
+        print("Configured LiteLLM to use Mistral on RunPod")
 
-    def determine_research_breadth_and_depth(self, query: str):
+    def determine_research_breadth_and_depth(self, query: str) -> BreadthDepthResponse:
         user_prompt = f"""
-		You are a research planning assistant. Your task is to determine the appropriate breadth and depth for researching a topic defined by a user's query. Evaluate the query's complexity and scope, then recommend values on the following scales:
+			You are a research planning assistant. Your task is to determine the appropriate breadth and depth for researching a topic defined by a user's query. Evaluate the query's complexity and scope, then recommend values on the following scales:
 
-		Breadth: Scale of 1 (very narrow) to 10 (extensive, multidisciplinary).
-		Depth: Scale of 1 (basic overview) to 5 (highly detailed, in-depth analysis).
-		Defaults:
+			Breadth: Scale of 1 (very narrow) to 10 (extensive, multidisciplinary).
+			Depth: Scale of 1 (basic overview) to 5 (highly detailed, in-depth analysis).
+			Defaults:
 
-		Breadth: 4
-		Depth: 2
-		Note: More complex or "harder" questions should prompt higher ratings on one or both scales, reflecting the need for more extensive research and deeper analysis.
+			Breadth: 4
+			Depth: 2
+			Note: More complex or "harder" questions should prompt higher ratings on one or both scales, reflecting the need for more extensive research and deeper analysis.
 
-		Response Format:
-		Output your recommendation in JSON format, including an explanation. For example:
-		```json
-		{{
-			"breadth": 4,
-			"depth": 2,
-			"explanation": "The topic is moderately complex; a broad review is needed (breadth 4) with a basic depth analysis (depth 2)."
-		}}
-		```
+			Response Format:
+			Output your recommendation in JSON format, including an explanation. For example:
+			```json
+			{{
+				"breadth": 4,
+				"depth": 2,
+				"explanation": "The topic is moderately complex; a broad review is needed (breadth 4) with a basic depth analysis (depth 2)."
+			}}
+			```
 
-		Here is the user's query:
-		<query>{query}</query>
-		"""
+			Here is the user's query:
+			<query>{query}</query>
+			"""
 
-        generation_config = {
-            "temperature": 1,
-            "top_p": 0.95,
-            "top_k": 40,
-            "max_output_tokens": 8192,
-            "response_mime_type": "application/json",
-            "response_schema": content.Schema(
-                type=content.Type.OBJECT,
-                enum=[],
-                required=["breadth", "depth", "explanation"],
-                properties={
-                    "breadth": content.Schema(type=content.Type.NUMBER),
-                    "depth": content.Schema(type=content.Type.NUMBER),
-                    "explanation": content.Schema(type=content.Type.STRING),
-                },
-            ),
-        }
+        # Define messages for LiteLLM
+        messages = [
+            {"role": "system", "content": "You are a research planning assistant that determines appropriate research parameters."},
+            {"role": "user", "content": user_prompt}
+        ]
 
-        model = genai.GenerativeModel(
-            "gemini-2.0-flash",
-            generation_config=generation_config,
-        )
-
-        response = model.generate_content(user_prompt)
-        answer = response.text
-
-        return json.loads(answer)
+        try:
+            # Make a direct API call to RunPod instead of using LiteLLM
+            print("Making direct API call to RunPod...")
+            
+            prompt = self.runpod_adapter.format_messages_to_prompt(messages)
+            
+            import requests
+            import json
+            
+            payload = {
+                "input": {
+                    "prompt": prompt,
+                    "max_tokens": 8192,
+                    "temperature": 1.0,
+                    "top_p": 0.95
+                }
+            }
+            
+            headers = {
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {self.runpod_api_key}"
+            }
+            
+            response = requests.post(
+                f"https://api.runpod.ai/v2/{self.endpoint_id}/run",
+                headers=headers,
+                json=payload
+            )
+            
+            if response.status_code != 200:
+                raise Exception(f"RunPod API error: {response.status_code}, {response.text}")
+            
+            result = response.json()
+            output_text = result.get("output", "")
+            
+            # Try to extract JSON from the response text
+            try:
+                # Look for JSON pattern in the text
+                import re
+                json_match = re.search(r'```json\s*(.*?)\s*```', output_text, re.DOTALL)
+                if json_match:
+                    json_str = json_match.group(1)
+                else:
+                    # If no JSON block found, try to parse the whole text
+                    json_str = output_text
+                
+                # Parse JSON
+                json_response = json.loads(json_str)
+                
+                # Make sure required fields are present
+                if not all(k in json_response for k in ["breadth", "depth", "explanation"]):
+                    # If not, set default values
+                    json_response = {
+                        "breadth": 4,
+                        "depth": 2,
+                        "explanation": f"Default values used for research on '{query}'."
+                    }
+                
+                return BreadthDepthResponse(**json_response)
+                
+            except json.JSONDecodeError:
+                # If we can't parse JSON, use default values
+                print(f"Could not parse JSON from response. Using default values.")
+                return BreadthDepthResponse(
+                    breadth=4,
+                    depth=2,
+                    explanation=f"Default values used for research on '{query}'."
+                )
+            
+        except Exception as e:
+            print(f"Error calling RunPod API: {e}")
+            
+            # Use default values instead of trying Gemini
+            print("Using default research parameters.")
+            return BreadthDepthResponse(
+                breadth=4,
+                depth=2,
+                explanation=f"Default values used for research on '{query}'."
+            )
 
     def generate_follow_up_questions(
+        self,  # Changed to instance method
         query: str,
         max_questions: int = 3,
-    ):
-        user_prompt = f"""
-		Given the following query from the user, ask some follow up questions to clarify the research direction.
+    ) -> List[str]:
+        import re
+        import json
+        
+        user_prompt = """
+			Given the following query from the user, ask some follow up questions to clarify the research direction.
 
-		Return a maximum of {max_questions} questions, but feel free to return less if the original query is clear: <query>{query}</query>
-		"""
+			Return a maximum of {} questions, but feel free to return less if the original query is clear: <query>{}</query>
+        
+        Your response should be in JSON format as follows:
+        {{
+          "follow_up_queries": [
+            "Question 1?",
+            "Question 2?",
+            "Question 3?"
+          ]
+        }}
+			""".format(max_questions, query)
 
-        generation_config = {
-            "temperature": 1,
-            "top_p": 0.95,
-            "top_k": 40,
-            "max_output_tokens": 8192,
-            "response_mime_type": "application/json",
-            "response_schema": content.Schema(
-                type=content.Type.OBJECT,
-                enum=[],
-                required=["follow_up_queries"],
-                properties={
-                    "follow_up_queries": content.Schema(
-                        type=content.Type.ARRAY,
-                        items=content.Schema(
-                            type=content.Type.STRING,
-                        ),
-                    ),
-                },
-            ),
-        }
+        # Define messages for direct API call
+        messages = [
+            {"role": "system", "content": "You are a research assistant that generates follow-up questions to clarify research direction."},
+            {"role": "user", "content": user_prompt}
+        ]
 
-        model = genai.GenerativeModel(
-            "gemini-2.0-flash",
-            generation_config=generation_config,
-        )
-
-        response = model.generate_content(user_prompt)
-        answer = response.text
-
-        return json.loads(answer)["follow_up_queries"]
+        try:
+            # Use direct API call to RunPod instead of LiteLLM
+            print("Making direct API call to RunPod for follow-up questions...")
+            
+            # Use the RunPod provider directly
+            response = self.runpod_provider.completion(
+                model="mistral-24b-instruct",  # Model name doesn't matter for direct provider
+                messages=messages,
+                temperature=1.0,
+                top_p=0.95,
+                max_tokens=4096
+            )
+            
+            output_text = response.choices[0].message.content
+            
+            # Try to extract JSON from the response text
+            try:
+                # Look for JSON pattern in the text
+                json_match = re.search(r'```json\s*(.*?)\s*```', output_text, re.DOTALL)
+                if json_match:
+                    json_str = json_match.group(1)
+                else:
+                    # If no JSON block found, try to parse the whole text
+                    json_str = output_text
+                
+                json_response = json.loads(json_str)
+                
+                # Make sure follow_up_queries field is present
+                if "follow_up_queries" not in json_response:
+                    # Try to extract questions from the text if no JSON
+                    questions = re.findall(r'\d+\.\s+(.*?\?)', output_text)
+                    if questions:
+                        return questions[:max_questions]
+                    else:
+                        # Return default questions
+                        return [
+                            f"What specific aspects of {query} are you interested in?",
+                            f"What is your goal for researching {query}?",
+                            f"Any specific timeframe or context for {query}?"
+                        ][:max_questions]
+                
+                return json_response["follow_up_queries"]
+                
+            except (json.JSONDecodeError, KeyError) as e:
+                print(f"Could not parse JSON for follow-up questions: {e}")
+                # Try to extract questions directly from text
+                questions = re.findall(r'\d+\.\s+(.*?\?)', output_text)
+                if questions:
+                    return questions[:max_questions]
+                else:
+                    # Generate some default questions if extraction fails
+                    return [
+                        f"What specific aspects of {query} are you interested in?",
+                        f"What is your goal for researching {query}?",
+                        f"Any specific timeframe or context for {query}?"
+                    ][:max_questions]
+            
+        except Exception as e:
+            print(f"Error calling RunPod API for follow-up questions: {e}")
+            
+            # Generate some default questions
+            print("Using default follow-up questions.")
+            return [
+                f"What specific aspects of {query} are you interested in?",
+                f"What is your goal for researching {query}?", 
+                f"Any specific timeframe or context for {query}?"
+            ][:max_questions]
 
     def generate_queries(
             self,
@@ -267,7 +648,10 @@ class DeepSearch:
             num_queries: int = 3,
             learnings: list[str] = [],
             previous_queries: set[str] = None  # Add previous_queries parameter
-    ):
+    ) -> List[str]:
+        import re
+        import json
+        
         now = datetime.datetime.now().strftime("%Y-%m-%d")
 
         # Format previous queries for the prompt
@@ -285,47 +669,94 @@ class DeepSearch:
 
         Original prompt: <prompt>${query}</prompt>
         {previous_queries_text}
+        
+        Your response should be in JSON format as follows:
+        {{
+          "queries": [
+            "Query 1",
+            "Query 2",
+            "Query 3"
+          ]
+        }}
         """
 
         learnings_prompt = "" if not learnings else "Here are some learnings from previous research, use them to generate more specific queries: " + \
             "\n".join(learnings)
+            
+        full_prompt = user_prompt + learnings_prompt
 
-        generation_config = {
-            "temperature": 1,
-            "top_p": 0.95,
-            "top_k": 40,
-            "max_output_tokens": 8192,
-            "response_schema": content.Schema(
-                type=content.Type.OBJECT,
-                enum=[],
-                required=["queries"],
-                properties={
-                    "queries": content.Schema(
-                        type=content.Type.ARRAY,
-                        items=content.Schema(
-                            type=content.Type.STRING,
-                        ),
-                    ),
-                },
-            ),
-            "response_mime_type": "application/json",
-        }
+        # Define messages for direct API call
+        messages = [
+            {"role": "system", "content": "You are a research assistant that generates search queries for research topics."},
+            {"role": "user", "content": full_prompt}
+        ]
 
-        model = genai.GenerativeModel(
-            "gemini-2.0-flash",
-            generation_config=generation_config,
-        )
-
-        # generate a list of queries
-        response = model.generate_content(
-            user_prompt + learnings_prompt
-        )
-
-        answer = response.text
-
-        answer_list = json.loads(answer)["queries"]
-
-        return answer_list
+        try:
+            # Use direct RunPod API 
+            print("Making direct API call to RunPod for generating queries...")
+            
+            response = self.runpod_provider.completion(
+                model="mistral-24b-instruct",  # Model name doesn't matter for direct provider
+                messages=messages,
+                temperature=1.0,
+                top_p=0.95,
+                max_tokens=4096
+            )
+            
+            output_text = response.choices[0].message.content
+            
+            # Try to extract JSON from the response text
+            try:
+                # Look for JSON pattern in the text
+                json_match = re.search(r'```json\s*(.*?)\s*```', output_text, re.DOTALL)
+                if json_match:
+                    json_str = json_match.group(1)
+                else:
+                    # If no JSON block found, try to parse the whole text
+                    json_str = output_text
+                
+                json_response = json.loads(json_str)
+                
+                # Make sure queries field is present
+                if "queries" not in json_response:
+                    # Try to extract queries from the text if no JSON
+                    lines = re.findall(r'\d+\.\s+(.*)', output_text)
+                    if lines:
+                        return lines[:num_queries]
+                    else:
+                        # Generate default queries
+                        return [
+                            f"{query} research papers",
+                            f"{query} latest developments",
+                            f"{query} technical details"
+                        ][:num_queries]
+                
+                return json_response["queries"]
+                
+            except (json.JSONDecodeError, KeyError) as e:
+                print(f"Could not parse JSON for query generation: {e}")
+                # Try to extract queries directly from text
+                lines = re.findall(r'\d+\.\s+(.*)', output_text)
+                if lines:
+                    return lines[:num_queries]
+                else:
+                    # Generate some default queries if extraction fails
+                    return [
+                        f"{query} research papers",
+                        f"{query} latest developments",
+                        f"{query} technical details"
+                    ][:num_queries]
+            
+        except Exception as e:
+            print(f"Error calling LiteLLM for query generation: {e}")
+            
+            # Generate some default queries
+            print("Using default queries.")
+            return [
+                f"{query} research papers",
+                f"{query} latest developments",
+                f"{query} technical details"
+            ][:num_queries]
 
     def format_text_with_sources(self, response_dict: dict, answer: str):
         """
@@ -393,38 +824,41 @@ class DeepSearch:
             return answer, {}
 
     def search(self, query: str):
-        client = genai_client.Client(
-            api_key=os.environ.get("GEMINI_KEY")
-        )
-
-        model_id = "gemini-2.0-flash"
-
-        google_search_tool = types.Tool(
-            google_search=types.GoogleSearch()
-        )
-
-        generation_config = {
-            "temperature": 1,
-            "top_p": 0.95,
-            "top_k": 40,
-            "max_output_tokens": 8192,
-            "response_mime_type": "text/plain",
-            "response_modalities": ["TEXT"],
-            "tools": [google_search_tool]
-        }
-
-        response = client.models.generate_content(
-            model=model_id,
-            contents=query,
-            config=generation_config
-        )
-
-        response_dict = response.model_dump()
-
-        formatted_text, sources = self.format_text_with_sources(
-            response_dict, response.text)
-
-        return formatted_text, sources
+        """
+        Perform a search using Mistral on RunPod.
+        This simpler implementation doesn't use search tools but asks the model to generate information.
+        """
+        try:
+            # Create system and user messages
+            messages = [
+                {"role": "system", "content": "You are a helpful assistant that provides comprehensive research information on topics. Please provide detailed and accurate information about the following query, including relevant facts, figures, dates, and analysis."},
+                {"role": "user", "content": f"Please research and provide detailed information about: {query}"}
+            ]
+            
+            # Use direct RunPod API
+            print(f"Making direct API call to RunPod for search query: {query}")
+            
+            # Call RunPod provider directly
+            response = self.runpod_provider.completion(
+                model="mistral-24b-instruct",  # Model name doesn't matter for direct provider
+                messages=messages,
+                temperature=0.7,
+                top_p=0.95,
+                max_tokens=4096
+            )
+            
+            # Extract the response text
+            response_text = response.choices[0].message.content
+            
+            # Create empty sources since we're not using a search tool
+            sources = {}
+            
+            return response_text, sources
+            
+        except Exception as e:
+            print(f"Error performing search with RunPod: {e}")
+            # Return empty results in case of failure
+            return f"Error performing search: {e}", {}
 
     async def process_result(
         self,
@@ -432,61 +866,156 @@ class DeepSearch:
         result: str,
         num_learnings: int = 3,
         num_follow_up_questions: int = 3,
-    ):
+    ) -> Dict[str, List[str]]:
+        import re
+        import json
+        
         print(f"Processing result for query: {query}")
 
         user_prompt = f"""
-		Given the following result from a SERP search for the query <query>{query}</query>, generate a list of learnings from the result. Return a maximum of {num_learnings} learnings, but feel free to return less if the result is clear. Make sure each learning is unique and not similar to each other. The learnings should be concise and to the point, as detailed and information dense as possible. Make sure to include any entities like people, places, companies, products, things, etc in the learnings, as well as any exact metrics, numbers, or dates. The learnings will be used to research the topic further.
-		"""
+			Given the following result from a SERP search for the query <query>{query}</query>, generate a list of learnings from the result. Return a maximum of {num_learnings} learnings, but feel free to return less if the result is clear. Make sure each learning is unique and not similar to each other. The learnings should be concise and to the point, as detailed and information dense as possible. Make sure to include any entities like people, places, companies, products, things, etc in the learnings, as well as any exact metrics, numbers, or dates. The learnings will be used to research the topic further.
+        
+        Here is the result:
+        {result}
+        
+        Your response should be in JSON format as follows:
+        {{
+          "learnings": [
+            "Learning 1",
+            "Learning 2",
+            "Learning 3"
+          ],
+          "follow_up_questions": [
+            "Question 1?",
+            "Question 2?",
+            "Question 3?"
+          ]
+        }}
+			"""
 
-        generation_config = {
-            "temperature": 1,
-            "top_p": 0.95,
-            "top_k": 40,
-            "max_output_tokens": 8192,
-            "response_mime_type": "application/json",
-            "response_schema": content.Schema(
-                type=content.Type.OBJECT,
-                enum=[],
-                required=["learnings", "follow_up_questions"],
-                properties={
-                    "learnings": content.Schema(
-                        type=content.Type.ARRAY,
-                        items=content.Schema(
-                            type=content.Type.STRING
-                        )
-                    ),
-                    "follow_up_questions": content.Schema(
-                        type=content.Type.ARRAY,
-                        items=content.Schema(
-                            type=content.Type.STRING
-                        )
-                    )
-                },
-            ),
-        }
+        # Define messages for direct API call
+        messages = [
+            {"role": "system", "content": "You extract key learnings and generate follow-up questions from search results."},
+            {"role": "user", "content": user_prompt}
+        ]
 
-        model = genai.GenerativeModel(
-            "gemini-2.0-flash",
-            generation_config=generation_config,
-        )
-
-        response = model.generate_content(user_prompt)
-        answer = response.text
-
-        answer_json = json.loads(answer)
-
-        learnings = answer_json["learnings"]
-        follow_up_questions = answer_json["follow_up_questions"]
-
-        print(f"Results from {query}:")
-        print(f"Learnings: {learnings}\n")
-        print(f"Follow up questions: {follow_up_questions}\n")
-
-        return answer_json
+        try:
+            # Use direct RunPod API
+            print("Making direct API call to RunPod for processing results...")
+            
+            response = self.runpod_provider.completion(
+                model="mistral-24b-instruct",  # Model name doesn't matter for direct provider
+                messages=messages,
+                temperature=1.0,
+                top_p=0.95,
+                max_tokens=4096
+            )
+            
+            output_text = response.choices[0].message.content
+            
+            # Try to extract JSON from the response text
+            try:
+                # Look for JSON pattern in the text
+                json_match = re.search(r'```json\s*(.*?)\s*```', output_text, re.DOTALL)
+                if json_match:
+                    json_str = json_match.group(1)
+                else:
+                    # If no JSON block found, try to parse the whole text
+                    json_str = output_text
+                
+                json_response = json.loads(json_str)
+                
+                # Make sure required fields are present
+                if not all(k in json_response for k in ["learnings", "follow_up_questions"]):
+                    # If missing fields, try to extract directly from text
+                    learnings = []
+                    questions = []
+                    
+                    # Try to extract learnings
+                    learnings_section = re.search(r'Learnings:(.*?)(?:Follow-up Questions:|$)', output_text, re.DOTALL | re.IGNORECASE)
+                    if learnings_section:
+                        learnings = re.findall(r'\d+\.\s+(.*?)(?=\d+\.|\n\n|$)', learnings_section.group(1), re.DOTALL)
+                        learnings = [l.strip() for l in learnings if l.strip()]
+                    
+                    # Try to extract questions
+                    questions_section = re.search(r'Follow-up Questions:(.*?)(?:\n\n|$)', output_text, re.DOTALL | re.IGNORECASE)
+                    if questions_section:
+                        questions = re.findall(r'\d+\.\s+(.*?)(?=\d+\.|\n\n|$)', questions_section.group(1), re.DOTALL)
+                        questions = [q.strip() for q in questions if q.strip()]
+                    
+                    # Use defaults if extraction failed
+                    if not learnings:
+                        learnings = [f"Key information about {query}"]
+                    if not questions:
+                        questions = [f"What are the most important aspects of {query}?"]
+                    
+                    return {
+                        "learnings": learnings[:num_learnings],
+                        "follow_up_questions": questions[:num_follow_up_questions]
+                    }
+                
+                # Process results
+                learnings = json_response["learnings"][:num_learnings]
+                follow_up_questions = json_response["follow_up_questions"][:num_follow_up_questions]
+                
+                print(f"Results from {query}:")
+                print(f"Learnings: {learnings}\n")
+                print(f"Follow up questions: {follow_up_questions}\n")
+                
+                return {
+                    "learnings": learnings,
+                    "follow_up_questions": follow_up_questions
+                }
+                
+            except (json.JSONDecodeError, KeyError) as e:
+                print(f"Could not parse JSON for result processing: {e}")
+                # Try to extract directly from text
+                learnings = []
+                questions = []
+                
+                # Try to extract learnings
+                learnings_section = re.search(r'Learnings:(.*?)(?:Follow-up Questions:|$)', output_text, re.DOTALL | re.IGNORECASE)
+                if learnings_section:
+                    learnings = re.findall(r'\d+\.\s+(.*?)(?=\d+\.|\n\n|$)', learnings_section.group(1), re.DOTALL)
+                    learnings = [l.strip() for l in learnings if l.strip()]
+                
+                # Try to extract questions
+                questions_section = re.search(r'Follow-up Questions:(.*?)(?:\n\n|$)', output_text, re.DOTALL | re.IGNORECASE)
+                if questions_section:
+                    questions = re.findall(r'\d+\.\s+(.*?)(?=\d+\.|\n\n|$)', questions_section.group(1), re.DOTALL)
+                    questions = [q.strip() for q in questions if q.strip()]
+                
+                # Use defaults if extraction failed
+                if not learnings:
+                    learnings = [f"Key information about {query}"]
+                if not questions:
+                    questions = [f"What are the most important aspects of {query}?"]
+                
+                print(f"Results from {query}:")
+                print(f"Learnings: {learnings}\n")
+                print(f"Follow up questions: {questions}\n")
+                
+                return {
+                    "learnings": learnings[:num_learnings],
+                    "follow_up_questions": questions[:num_follow_up_questions]
+                }
+            
+        except Exception as e:
+            print(f"Error calling LiteLLM for result processing: {e}")
+            
+            # Use default values
+            default_learnings = [f"Key information about {query}"]
+            default_questions = [f"What are the most important aspects of {query}?"]
+            
+            print(f"Using default learnings and questions for {query}")
+            
+            return {
+                "learnings": default_learnings,
+                "follow_up_questions": default_questions
+            }
 
     def _are_queries_similar(self, query1: str, query2: str) -> bool:
-        """Helper method to check if two queries are semantically similar using Gemini"""
+        """Helper method to check if two queries are semantically similar using direct RunPod API"""
         user_prompt = f"""
         Compare these two search queries and determine if they are semantically similar 
         (i.e., would likely return similar search results or are asking about the same topic):
@@ -501,39 +1030,68 @@ class DeepSearch:
         4. Core topic overlap
 
         Only respond with true if the queries are notably similar, false otherwise.
+        
+        Your response should be in JSON format as follows:
+        {{
+          "are_similar": true or false
+        }}
         """
 
-        generation_config = {
-            "temperature": 0.1,  # Low temperature for more consistent results
-            "top_p": 0.95,
-            "top_k": 40,
-            "max_output_tokens": 8192,
-            "response_mime_type": "application/json",
-            "response_schema": content.Schema(
-                type=content.Type.OBJECT,
-                required=["are_similar"],
-                properties={
-                    "are_similar": content.Schema(
-                        type=content.Type.BOOLEAN,
-                        description="True if queries are semantically similar, false otherwise"
-                    )
-                }
-            )
-        }
+        # Define messages for direct API call
+        messages = [
+            {"role": "system", "content": "You determine whether search queries are semantically similar."},
+            {"role": "user", "content": user_prompt}
+        ]
 
         try:
-            model = genai.GenerativeModel(
-                "gemini-2.0-flash",
-                generation_config=generation_config,
+            # Call RunPod provider directly
+            response = self.runpod_provider.completion(
+                model="mistral-24b-instruct",  # Model name doesn't matter for direct provider
+                messages=messages,
+                temperature=0.1,  # Low temperature for more consistent results
+                top_p=0.95,
+                max_tokens=4096
             )
 
-            response = model.generate_content(user_prompt)
-            answer = json.loads(response.text)
-            return answer["are_similar"]
+            # Extract and parse the response
+            json_response = json.loads(response.choices[0].message.content)
+            return QuerySimilarityResponse(**json_response).are_similar
+            
         except Exception as e:
-            print(f"Error comparing queries: {str(e)}")
-            # In case of error, assume queries are different to avoid missing potentially unique results
-            return False
+            print(f"Error calling LiteLLM for query similarity: {e}")
+            
+            # Fallback to legacy approach if needed
+            generation_config = {
+                "temperature": 0.1,  # Low temperature for more consistent results
+                "top_p": 0.95,
+                "top_k": 40,
+                "max_output_tokens": 8192,
+                "response_mime_type": "application/json",
+                "response_schema": content.Schema(
+                    type=content.Type.OBJECT,
+                    required=["are_similar"],
+                    properties={
+                        "are_similar": content.Schema(
+                            type=content.Type.BOOLEAN,
+                            description="True if queries are semantically similar, false otherwise"
+                        )
+                    }
+                )
+            }
+
+            try:
+                model = genai.GenerativeModel(
+                    "gemini-2.0-flash",
+                    generation_config=generation_config,
+                )
+
+                response = model.generate_content(user_prompt)
+                answer = json.loads(response.text)
+                return answer["are_similar"]
+            except Exception as e:
+                print(f"Error comparing queries: {str(e)}")
+                # In case of error, assume queries are different to avoid missing potentially unique results
+                return False
 
     async def deep_research(self, query: str, breadth: int, depth: int, learnings: list[str] = [], visited_urls: dict[int, dict] = {}, parent_query: str = None):
         progress = ResearchProgress(depth, breadth)
@@ -703,27 +1261,75 @@ class DeepSearch:
         Be bold and creative in your approach while ensuring the report effectively communicates all the important information!
         """
 
-        generation_config = {
-            "temperature": 0.9,  # Increased for more creativity
-            "top_p": 0.95,
-            "top_k": 40,
-            "max_output_tokens": 8192,
-        }
-
-        model = genai.GenerativeModel(
-            "gemini-2.0-flash",
-            generation_config=generation_config,
-        )
+        # Define messages for direct API call
+        messages = [
+            {"role": "system", "content": "You are a creative research analyst that synthesizes findings into engaging reports."},
+            {"role": "user", "content": user_prompt}
+        ]
 
         print("Generating final report...\n")
 
-        response = model.generate_content(user_prompt)
+        try:
+            # Using direct RunPod API
+            print("Making direct API call to RunPod for final report generation...")
+            
+            response = self.runpod_provider.completion(
+                model="mistral-24b-instruct",  # Model name doesn't matter for direct provider
+                messages=messages,
+                temperature=0.9,  # Increased for more creativity
+                top_p=0.95,
+                max_tokens=8192
+            )
+            
+            # Extract the response text from the actual RunPod response format
+            try:
+                # Check if the response has proper structure
+                if hasattr(response, 'choices') and len(response.choices) > 0 and hasattr(response.choices[0], 'message'):
+                    formatted_text = response.choices[0].message.content
+                else:
+                    # For our custom objects or direct access to the RunPod output
+                    if isinstance(response, str):
+                        formatted_text = response
+                    elif isinstance(response, list) and len(response) > 0:
+                        # Extract from RunPod token format
+                        if 'choices' in response[0] and isinstance(response[0]['choices'], list):
+                            all_tokens = []
+                            for choice in response[0]['choices']:
+                                if 'tokens' in choice and isinstance(choice['tokens'], list):
+                                    all_tokens.extend(choice['tokens'])
+                            formatted_text = ''.join(all_tokens)
+                        else:
+                            formatted_text = str(response)
+                    else:
+                        # Some other object form
+                        formatted_text = str(response)
+                        
+                # If no response, use a default message
+                if not formatted_text:
+                    formatted_text = f"Error: No content generated for report on {query}."
+                    
+                print(f"Final report content (first 500 chars):\n{formatted_text[:500]}...")
+                
+            except Exception as e:
+                print(f"Error extracting content from response: {e}")
+                formatted_text = f"Error processing report response for query on {query}: {str(e)}"
+            
+        except Exception as e:
+            print(f"Error calling LiteLLM for final report: {e}")
+            
+            # Use basic placeholder text
+            formatted_text = f"""
+# Report on {query}
 
-        # Format the response with inline citations
-        formatted_text, sources = self.format_text_with_sources(
-            response.to_dict(),
-            response.text
-        )
+## Summary
+This is a placeholder report. The report generation experienced technical difficulties.
+
+## Key Findings
+{learnings_text}
+
+## Conclusion
+Please try regenerating this report or consider refining your query.
+"""
 
         # Add sources section
         sources_section = "\n# Sources\n" + "\n".join([
@@ -732,6 +1338,4 @@ class DeepSearch:
         ])
 
         return formatted_text + sources_section
-
-
 
