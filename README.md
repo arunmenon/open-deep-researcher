@@ -1,10 +1,11 @@
-# Deep Research with Mistral
+# Open Deep Research
 
-A powerful open-source research assistant that performs deep, multi-layered research on any topic, powered by Mistral AI via custom RunPod deployment.
+A powerful open-source research assistant with a modular architecture that performs deep, multi-layered research on any topic, powered by LLMs (currently Mistral AI via RunPod).
 
 ## Features
 
 - Automated deep research with adjustable breadth and depth
+- Modular architecture with pluggable model providers
 - Follow-up question generation for better context
 - Concurrent processing of multiple research queries
 - Comprehensive final report generation with citations
@@ -28,9 +29,10 @@ You can set up this project in one of two ways:
 
 1. Open the project in VS Code
 2. When prompted, click "Reopen in Container" or run the "Dev Containers: Reopen in Container" command
-3. Create a `.env` file in the root directory and add your Gemini API key:
+3. Create a `.env` file in the root directory and add your RunPod API keys:
    ```
-   GEMINI_KEY=your_api_key_here
+   RUNPOD_API_KEY=your_runpod_api_key_here
+   RUNPOD_ENDPOINT_ID=your_runpod_endpoint_id_here
    ```
 
 ### Option 2: Local Installation
@@ -94,12 +96,20 @@ The script will:
 ## Project Structure
 
 ```
-open-gemini-deep-research/
+open-deep-research/
 ├── .devcontainer/
 │   └── devcontainer.json
 ├── src/
 │   ├── __init__.py
-│   └── deep_research.py
+│   ├── deep_research.py
+│   ├── models/
+│   │   ├── __init__.py
+│   │   ├── provider.py
+│   │   └── runpod_provider.py
+│   └── utils/
+│       ├── __init__.py
+│       ├── research_progress.py
+│       └── response_models.py
 ├── .env
 ├── .gitignore
 ├── dockerfile
@@ -178,8 +188,10 @@ The application offers three research modes that affect how deeply and broadly t
 
 ### Technical Implementation
 
-- Uses LiteLLM exclusively with Mistral 24B Instruct model
+- Modular design with provider interface for different LLM backends
+- Currently configured to use Mistral 24B Instruct model via RunPod
 - Custom RunPod adapter for seamless integration with self-hosted vLLM endpoints
+- Easy to add new model providers through the ModelProvider interface
 - Model operations include:
   - Query analysis and generation
   - Content processing and synthesis
@@ -221,4 +233,50 @@ Example tree structure:
   ],
   "parent_query": null
 }
+```
+
+## Extending with Custom Model Providers
+
+The application is designed to be extended with custom model providers. You can create your own by:
+
+1. Implementing the `ModelProvider` interface from `src/models/provider.py`
+2. Adding your custom provider class to the `src/models/` directory
+
+Example of a minimal provider implementation:
+
+```python
+from typing import Dict, List
+from ..models.provider import ModelProvider
+
+class CustomProvider(ModelProvider):
+    def __init__(self, api_key, other_params):
+        self.api_key = api_key
+        # Initialize your provider
+        
+    def completion(self, model, messages, temperature=0.7, max_tokens=2048, **kwargs):
+        # Implement API call to your model provider
+        # Return a response object compatible with the expected format
+        
+    def format_messages_to_prompt(self, messages):
+        # Convert chat messages to the format expected by your model
+        # Return formatted prompt string
+```
+
+To use your provider, initialize DeepSearch with your custom provider:
+
+```python
+from src.deep_research import DeepSearch
+from src.models.custom_provider import CustomProvider
+
+# Initialize your custom provider
+custom_provider = CustomProvider(api_key="your_api_key", other_params={})
+
+# Initialize DeepSearch with your provider
+deep_search = DeepSearch(
+    mode="balanced",
+    model_provider=custom_provider
+)
+
+# Use DeepSearch as normal
+results = deep_search.determine_research_breadth_and_depth("your query")
 ```

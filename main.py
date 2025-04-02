@@ -20,12 +20,10 @@ if __name__ == "__main__":
                         help='Number of queries to generate (default: 3)')
     parser.add_argument('--learnings', nargs='*', default=[],
                         help='List of previous learnings')
-    parser.add_argument('--use-mistral', action='store_true', 
-                        help='Use Mistral model hosted on RunPod (default: True)')
     parser.add_argument('--runpod-api-key', type=str, default=None,
                         help='RunPod API key (can also be set via RUNPOD_API_KEY environment variable)')
-    parser.add_argument('--use-gemini', action='store_true',
-                        help='Use Gemini model instead of Mistral')
+    parser.add_argument('--runpod-endpoint-id', type=str, default=None,
+                        help='RunPod endpoint ID (can also be set via RUNPOD_ENDPOINT_ID environment variable)')
 
     args = parser.parse_args()
 
@@ -37,23 +35,20 @@ if __name__ == "__main__":
     if not runpod_api_key:
         raise ValueError("Please set RUNPOD_API_KEY environment variable")
     
-    # Force use of Mistral only
-    use_mistral = True
-    if args.use_gemini:
-        print("Warning: --use-gemini flag ignored as we're configured for RunPod only")
+    # Get RunPod endpoint ID either from args or environment
+    runpod_endpoint_id = args.runpod_endpoint_id or os.getenv('RUNPOD_ENDPOINT_ID')
     
-    # Pass None for Gemini API key since we're not using it
+    # Create DeepSearch instance with new modular approach
     deep_search = DeepSearch(
-        api_key=None, 
         mode=args.mode,
-        use_mistral=use_mistral,
-        runpod_api_key=runpod_api_key
+        runpod_api_key=runpod_api_key,
+        runpod_endpoint_id=runpod_endpoint_id
     )
 
     breadth_and_depth = deep_search.determine_research_breadth_and_depth(
         args.query)
 
-    # The function now returns a BreadthDepthResponse object, not a dict
+    # The function returns a BreadthDepthResponse object
     breadth = breadth_and_depth.breadth
     depth = breadth_and_depth.depth
     explanation = breadth_and_depth.explanation
