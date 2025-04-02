@@ -11,19 +11,19 @@ from dotenv import load_dotenv
 load_dotenv()
 
 
-if __name__ == "__main__":
+async def main():
     parser = argparse.ArgumentParser(description='Run deep search queries')
     parser.add_argument('query', type=str, help='The search query')
     parser.add_argument('--mode', type=str, choices=['fast', 'balanced', 'comprehensive'],
-                        default='balanced', help='Research mode (default: balanced)')
+                      default='balanced', help='Research mode (default: balanced)')
     parser.add_argument('--num-queries', type=int, default=3,
-                        help='Number of queries to generate (default: 3)')
+                      help='Number of queries to generate (default: 3)')
     parser.add_argument('--learnings', nargs='*', default=[],
-                        help='List of previous learnings')
+                      help='List of previous learnings')
     parser.add_argument('--runpod-api-key', type=str, default=None,
-                        help='RunPod API key (can also be set via RUNPOD_API_KEY environment variable)')
+                      help='RunPod API key (can also be set via RUNPOD_API_KEY environment variable)')
     parser.add_argument('--runpod-endpoint-id', type=str, default=None,
-                        help='RunPod endpoint ID (can also be set via RUNPOD_ENDPOINT_ID environment variable)')
+                      help='RunPod endpoint ID (can also be set via RUNPOD_ENDPOINT_ID environment variable)')
 
     args = parser.parse_args()
 
@@ -45,7 +45,7 @@ if __name__ == "__main__":
         runpod_endpoint_id=runpod_endpoint_id
     )
 
-    breadth_and_depth = deep_search.determine_research_breadth_and_depth(
+    breadth_and_depth = await deep_search.determine_research_breadth_and_depth(
         args.query)
 
     # The function returns a BreadthDepthResponse object
@@ -61,7 +61,7 @@ if __name__ == "__main__":
     print("To better understand your research needs, please answer these follow-up questions:")
 
     try:
-        follow_up_questions = deep_search.generate_follow_up_questions(args.query)
+        follow_up_questions = await deep_search.generate_follow_up_questions(args.query)
     except Exception as e:
         print(f"Error generating follow-up questions: {e}")
         follow_up_questions = [
@@ -108,16 +108,16 @@ if __name__ == "__main__":
     print("Starting research... \n")
 
     # Run the deep research
-    results = asyncio.run(deep_search.deep_research(
+    results = await deep_search.deep_research(
         query=combined_query,
         breadth=breadth,
         depth=depth,
         learnings=[],
         visited_urls={}
-    ))
+    )
 
     # Generate and print the final report
-    final_report = deep_search.generate_final_report(
+    final_report = await deep_search.generate_final_report(
         query=combined_query,
         learnings=results["learnings"],
         visited_urls=results["visited_urls"]
@@ -138,3 +138,7 @@ if __name__ == "__main__":
         f.write(final_report)
         f.write(
             f"\n\nTotal research time: {minutes} minutes and {seconds} seconds")
+
+
+if __name__ == "__main__":
+    asyncio.run(main())

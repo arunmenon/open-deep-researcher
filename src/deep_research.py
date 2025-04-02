@@ -1,4 +1,4 @@
-from typing import Callable, List, TypeVar, Any, Dict, Optional, Union
+from typing import Callable, List, TypeVar, Any, Dict, Optional, Union, Set
 import asyncio
 import datetime
 import json
@@ -7,19 +7,21 @@ import re
 import math
 
 from dotenv import load_dotenv
-import litellm
 
 # Import from our newly organized structure
 from .utils.research_progress import ResearchProgress
-from .utils.response_models import (
-    BreadthDepthResponse, 
-    FollowUpQueriesResponse, 
-    QueriesResponse, 
-    QuerySimilarityResponse, 
-    ProcessResultResponse
-)
 from .models.provider import ModelProvider
 from .models.runpod_provider import RunpodProvider
+
+# Import services
+from .services.query_analyzer import QueryAnalyzer
+from .services.query_generator import QueryGenerator
+from .services.search_service import SearchService
+from .services.result_processor import ResultProcessor
+from .services.report_generator import ReportGenerator
+
+# Import configuration
+from .config.research_modes import ResearchModes, ResearchModeConfig
 
 load_dotenv()
 
@@ -38,9 +40,6 @@ class DeepSearch:
             runpod_api_key: API key for RunPod
             runpod_endpoint_id: Endpoint ID for RunPod
         """
-        self.query_history = set()
-        self.mode = mode
-        
         # Set up the model provider
         if model_provider:
             self.model_provider = model_provider
@@ -53,29 +52,20 @@ class DeepSearch:
             self.endpoint_id = runpod_endpoint_id or os.getenv("RUNPOD_ENDPOINT_ID", "w0oa6hyd2q40jw")
             self.model_provider = RunpodProvider(self.runpod_api_key, self.endpoint_id)
         
-        # Configure the model name for compatibility
+        # Get the research mode configuration
+        self.mode_config = ResearchModes.get_mode_config(mode)
         self.model_name = "runpod/mistral-24b-instruct"
         
-        # Register with LiteLLM for compatibility
-        try:
-            def custom_completion(model, messages, **kwargs):
-                return self.model_provider.completion(model, messages, **kwargs)
-                
-            if hasattr(litellm, 'register_model'):
-                litellm.register_model(self.model_name, custom_completion)
-            elif hasattr(litellm, 'register_completion_function'):
-                litellm.register_completion_function(
-                    model_name=self.model_name,
-                    completion_function=custom_completion
-                )
-            else:
-                print("Warning: Could not register custom model with litellm. Using direct provider approach.")
-        except Exception as e:
-            print(f"Warning: Could not register custom model with litellm ({str(e)}). Using direct provider approach.")
-                
-        print(f"Configured DeepSearch with {self.mode} mode")
+        # Initialize services
+        self.query_analyzer = QueryAnalyzer(self.model_provider, self.model_name)
+        self.query_generator = QueryGenerator(self.model_provider, self.model_name)
+        self.search_service = SearchService(self.model_provider, self.model_name)
+        self.result_processor = ResultProcessor(self.model_provider, self.model_name)
+        self.report_generator = ReportGenerator(self.model_provider, self.model_name)
         
-    def determine_research_breadth_and_depth(self, query: str) -> BreadthDepthResponse:
+        print(f"Configured DeepSearch with {mode} mode")
+        
+    async def determine_research_breadth_and_depth(self, query: str):
         """
         Determine appropriate research breadth and depth based on query complexity.
         
@@ -85,95 +75,9 @@ class DeepSearch:
         Returns:
             BreadthDepthResponse with breadth (1-10), depth (1-5), and explanation
         """
-        user_prompt = f"""
-        You are a research planning assistant. Your task is to determine the appropriate breadth and depth for researching a topic defined by a user's query. Evaluate the query's complexity and scope, then recommend values on the following scales:
-
-        Breadth: Scale of 1 (very narrow) to 10 (extensive, multidisciplinary).
-        Depth: Scale of 1 (basic overview) to 5 (highly detailed, in-depth analysis).
-        Defaults:
-
-        Breadth: 4
-        Depth: 2
-        Note: More complex or "harder" questions should prompt higher ratings on one or both scales, reflecting the need for more extensive research and deeper analysis.
-
-        Response Format:
-        Output your recommendation in JSON format, including an explanation. For example:
-        ```json
-        {{
-            "breadth": 4,
-            "depth": 2,
-            "explanation": "The topic is moderately complex; a broad review is needed (breadth 4) with a basic depth analysis (depth 2)."
-        }}
-        ```
-
-        Here is the user's query:
-        <query>{query}</query>
-        """
-
-        # Define messages for the model provider
-        messages = [
-            {"role": "system", "content": "You are a research planning assistant that determines appropriate research parameters."},
-            {"role": "user", "content": user_prompt}
-        ]
-
-        try:
-            # Make the API call through our model provider
-            print("Determining research breadth and depth...")
-            
-            response = self.model_provider.completion(
-                model=self.model_name,
-                messages=messages,
-                temperature=0.7,
-                max_tokens=4096
-            )
-            
-            output_text = response.choices[0].message.content
-            
-            # Try to extract JSON from the response text
-            try:
-                # Look for JSON pattern in the text
-                json_match = re.search(r'```json\s*(.*?)\s*```', output_text, re.DOTALL)
-                if json_match:
-                    json_str = json_match.group(1)
-                else:
-                    # If no JSON block found, try to parse the whole text
-                    json_str = output_text
-                
-                # Parse JSON
-                json_response = json.loads(json_str)
-                
-                # Make sure required fields are present
-                if not all(k in json_response for k in ["breadth", "depth", "explanation"]):
-                    # If not, set default values
-                    json_response = {
-                        "breadth": 4,
-                        "depth": 2,
-                        "explanation": f"Default values used for research on '{query}'."
-                    }
-                
-                return BreadthDepthResponse(**json_response)
-                
-            except json.JSONDecodeError:
-                # If we can't parse JSON, use default values
-                print(f"Could not parse JSON from response. Using default values.")
-                return BreadthDepthResponse(
-                    breadth=4,
-                    depth=2,
-                    explanation=f"Default values used for research on '{query}'."
-                )
-            
-        except Exception as e:
-            print(f"Error determining research parameters: {e}")
-            
-            # Use default values
-            print("Using default research parameters.")
-            return BreadthDepthResponse(
-                breadth=4,
-                depth=2,
-                explanation=f"Default values used for research on '{query}'."
-            )
-            
-    def generate_follow_up_questions(self, query: str, max_questions: int = 3) -> List[str]:
+        return await self.query_analyzer.determine_research_parameters(query)
+        
+    async def generate_follow_up_questions(self, query: str, max_questions: int = 3) -> List[str]:
         """
         Generate follow-up questions to clarify research direction
         
@@ -184,457 +88,7 @@ class DeepSearch:
         Returns:
             List of follow-up questions
         """
-        user_prompt = f"""
-        Given the following query from the user, ask some follow up questions to clarify the research direction.
-
-        Return a maximum of {max_questions} questions, but feel free to return less if the original query is clear: <query>{query}</query>
-        
-        Your response should be in JSON format as follows:
-        {{
-          "follow_up_queries": [
-            "Question 1?",
-            "Question 2?",
-            "Question 3?"
-          ]
-        }}
-        """
-
-        # Define messages for the model provider
-        messages = [
-            {"role": "system", "content": "You are a research assistant that generates follow-up questions to clarify research direction."},
-            {"role": "user", "content": user_prompt}
-        ]
-
-        try:
-            # Make the API call through our model provider
-            print("Generating follow-up questions...")
-            
-            response = self.model_provider.completion(
-                model=self.model_name,
-                messages=messages,
-                temperature=1.0,
-                max_tokens=4096
-            )
-            
-            output_text = response.choices[0].message.content
-            
-            # Try to extract JSON from the response text
-            try:
-                # Look for JSON pattern in the text
-                json_match = re.search(r'```json\s*(.*?)\s*```', output_text, re.DOTALL)
-                if json_match:
-                    json_str = json_match.group(1)
-                else:
-                    # If no JSON block found, try to parse the whole text
-                    json_str = output_text
-                
-                json_response = json.loads(json_str)
-                
-                # Make sure follow_up_queries field is present
-                if "follow_up_queries" not in json_response:
-                    # Try to extract questions from the text if no JSON
-                    questions = re.findall(r'\d+\.\s+(.*?\?)', output_text)
-                    if questions:
-                        return questions[:max_questions]
-                    else:
-                        # Return default questions
-                        return [
-                            f"What specific aspects of {query} are you interested in?",
-                            f"What is your goal for researching {query}?",
-                            f"Any specific timeframe or context for {query}?"
-                        ][:max_questions]
-                
-                return json_response["follow_up_queries"]
-                
-            except (json.JSONDecodeError, KeyError) as e:
-                print(f"Could not parse JSON for follow-up questions: {e}")
-                # Try to extract questions directly from text
-                questions = re.findall(r'\d+\.\s+(.*?\?)', output_text)
-                if questions:
-                    return questions[:max_questions]
-                else:
-                    # Generate some default questions if extraction fails
-                    return [
-                        f"What specific aspects of {query} are you interested in?",
-                        f"What is your goal for researching {query}?",
-                        f"Any specific timeframe or context for {query}?"
-                    ][:max_questions]
-            
-        except Exception as e:
-            print(f"Error generating follow-up questions: {e}")
-            
-            # Generate some default questions
-            print("Using default follow-up questions.")
-            return [
-                f"What specific aspects of {query} are you interested in?",
-                f"What is your goal for researching {query}?", 
-                f"Any specific timeframe or context for {query}?"
-            ][:max_questions]
-
-    def generate_queries(
-            self,
-            query: str,
-            num_queries: int = 3,
-            learnings: list[str] = [],
-            previous_queries: set[str] = None
-    ) -> List[str]:
-        """
-        Generate search queries based on the input query
-        
-        Args:
-            query: The main research query
-            num_queries: Maximum number of queries to generate
-            learnings: Optional list of previous learnings to improve query generation
-            previous_queries: Set of previously generated queries to avoid duplicates
-            
-        Returns:
-            List of generated search queries
-        """
-        # Format previous queries for the prompt
-        previous_queries_text = ""
-        if previous_queries:
-            previous_queries_text = "\n\nPreviously asked queries (avoid generating similar ones):\n" + \
-                "\n".join([f"- {q}" for q in previous_queries])
-
-        user_prompt = f"""
-        Given the following prompt from the user, generate a list of SERP queries to research the topic. Return a maximum
-        of {num_queries} queries, but feel free to return less if the original prompt is clear.
-
-        IMPORTANT: Each query must be unique and significantly different from both each other AND the previously asked queries.
-        Avoid semantic duplicates or queries that would likely return similar information.
-
-        Original prompt: <prompt>${query}</prompt>
-        {previous_queries_text}
-        
-        Your response should be in JSON format as follows:
-        {{
-          "queries": [
-            "Query 1",
-            "Query 2",
-            "Query 3"
-          ]
-        }}
-        """
-
-        learnings_prompt = "" if not learnings else "Here are some learnings from previous research, use them to generate more specific queries: " + \
-            "\n".join(learnings)
-            
-        full_prompt = user_prompt + learnings_prompt
-
-        # Define messages for the model provider
-        messages = [
-            {"role": "system", "content": "You are a research assistant that generates search queries for research topics."},
-            {"role": "user", "content": full_prompt}
-        ]
-
-        try:
-            # Make the API call through our model provider
-            print("Generating search queries...")
-            
-            response = self.model_provider.completion(
-                model=self.model_name,
-                messages=messages,
-                temperature=1.0,
-                max_tokens=4096
-            )
-            
-            output_text = response.choices[0].message.content
-            
-            # Try to extract JSON from the response text
-            try:
-                # Look for JSON pattern in the text
-                json_match = re.search(r'```json\s*(.*?)\s*```', output_text, re.DOTALL)
-                if json_match:
-                    json_str = json_match.group(1)
-                else:
-                    # If no JSON block found, try to parse the whole text
-                    json_str = output_text
-                
-                json_response = json.loads(json_str)
-                
-                # Make sure queries field is present
-                if "queries" not in json_response:
-                    # Try to extract queries from the text if no JSON
-                    lines = re.findall(r'\d+\.\s+(.*)', output_text)
-                    if lines:
-                        return lines[:num_queries]
-                    else:
-                        # Generate default queries
-                        return [
-                            f"{query} research papers",
-                            f"{query} latest developments",
-                            f"{query} technical details"
-                        ][:num_queries]
-                
-                return json_response["queries"]
-                
-            except (json.JSONDecodeError, KeyError) as e:
-                print(f"Could not parse JSON for query generation: {e}")
-                # Try to extract queries directly from text
-                lines = re.findall(r'\d+\.\s+(.*)', output_text)
-                if lines:
-                    return lines[:num_queries]
-                else:
-                    # Generate some default queries if extraction fails
-                    return [
-                        f"{query} research papers",
-                        f"{query} latest developments",
-                        f"{query} technical details"
-                    ][:num_queries]
-            
-        except Exception as e:
-            print(f"Error generating queries: {e}")
-            
-            # Generate some default queries
-            print("Using default queries.")
-            return [
-                f"{query} research papers",
-                f"{query} latest developments",
-                f"{query} technical details"
-            ][:num_queries]
-
-    def search(self, query: str):
-        """
-        Perform a search using the model provider
-        
-        Args:
-            query: The search query
-            
-        Returns:
-            Tuple of (result_text, sources_dict)
-        """
-        try:
-            # Create system and user messages
-            messages = [
-                {"role": "system", "content": "You are a helpful assistant that provides comprehensive research information on topics. Please provide detailed and accurate information about the following query, including relevant facts, figures, dates, and analysis."},
-                {"role": "user", "content": f"Please research and provide detailed information about: {query}"}
-            ]
-            
-            # Make the API call through our model provider
-            print(f"Performing search for query: {query}")
-            
-            response = self.model_provider.completion(
-                model=self.model_name,
-                messages=messages,
-                temperature=0.7,
-                max_tokens=4096
-            )
-            
-            # Extract the response text
-            response_text = response.choices[0].message.content
-            
-            # Create empty sources since we're not using a search tool
-            sources = {}
-            
-            return response_text, sources
-            
-        except Exception as e:
-            print(f"Error performing search: {e}")
-            # Return empty results in case of failure
-            return f"Error performing search: {e}", {}
-
-    async def process_result(self, query: str, result: str, num_learnings: int = 3, num_follow_up_questions: int = 3) -> Dict[str, List[str]]:
-        """
-        Process search results to extract key learnings and follow-up questions
-        
-        Args:
-            query: The search query
-            result: The search result text
-            num_learnings: Maximum number of learnings to extract
-            num_follow_up_questions: Maximum number of follow-up questions to generate
-            
-        Returns:
-            Dictionary with 'learnings' and 'follow_up_questions' lists
-        """
-        print(f"Processing result for query: {query}")
-
-        user_prompt = f"""
-        Given the following result from a SERP search for the query <query>{query}</query>, generate a list of learnings from the result. Return a maximum of {num_learnings} learnings, but feel free to return less if the result is clear. Make sure each learning is unique and not similar to each other. The learnings should be concise and to the point, as detailed and information dense as possible. Make sure to include any entities like people, places, companies, products, things, etc in the learnings, as well as any exact metrics, numbers, or dates. The learnings will be used to research the topic further.
-        
-        Here is the result:
-        {result}
-        
-        Your response should be in JSON format as follows:
-        {{
-          "learnings": [
-            "Learning 1",
-            "Learning 2",
-            "Learning 3"
-          ],
-          "follow_up_questions": [
-            "Question 1?",
-            "Question 2?",
-            "Question 3?"
-          ]
-        }}
-        """
-
-        # Define messages for the model provider
-        messages = [
-            {"role": "system", "content": "You extract key learnings and generate follow-up questions from search results."},
-            {"role": "user", "content": user_prompt}
-        ]
-
-        try:
-            # Make the API call through our model provider
-            print("Processing search results...")
-            
-            response = self.model_provider.completion(
-                model=self.model_name,
-                messages=messages,
-                temperature=1.0,
-                max_tokens=4096
-            )
-            
-            output_text = response.choices[0].message.content
-            
-            # Try to extract JSON from the response text
-            try:
-                # Look for JSON pattern in the text
-                json_match = re.search(r'```json\s*(.*?)\s*```', output_text, re.DOTALL)
-                if json_match:
-                    json_str = json_match.group(1)
-                else:
-                    # If no JSON block found, try to parse the whole text
-                    json_str = output_text
-                
-                json_response = json.loads(json_str)
-                
-                # Make sure required fields are present
-                if not all(k in json_response for k in ["learnings", "follow_up_questions"]):
-                    # If missing fields, try to extract directly from text
-                    learnings = []
-                    questions = []
-                    
-                    # Try to extract learnings
-                    learnings_section = re.search(r'Learnings:(.*?)(?:Follow-up Questions:|$)', output_text, re.DOTALL | re.IGNORECASE)
-                    if learnings_section:
-                        learnings = re.findall(r'\d+\.\s+(.*?)(?=\d+\.|\n\n|$)', learnings_section.group(1), re.DOTALL)
-                        learnings = [l.strip() for l in learnings if l.strip()]
-                    
-                    # Try to extract questions
-                    questions_section = re.search(r'Follow-up Questions:(.*?)(?:\n\n|$)', output_text, re.DOTALL | re.IGNORECASE)
-                    if questions_section:
-                        questions = re.findall(r'\d+\.\s+(.*?)(?=\d+\.|\n\n|$)', questions_section.group(1), re.DOTALL)
-                        questions = [q.strip() for q in questions if q.strip()]
-                    
-                    # Use defaults if extraction failed
-                    if not learnings:
-                        learnings = [f"Key information about {query}"]
-                    if not questions:
-                        questions = [f"What are the most important aspects of {query}?"]
-                    
-                    return {
-                        "learnings": learnings[:num_learnings],
-                        "follow_up_questions": questions[:num_follow_up_questions]
-                    }
-                
-                # Process results
-                learnings = json_response["learnings"][:num_learnings]
-                follow_up_questions = json_response["follow_up_questions"][:num_follow_up_questions]
-                
-                print(f"Results from {query}:")
-                print(f"Learnings: {learnings}\n")
-                print(f"Follow up questions: {follow_up_questions}\n")
-                
-                return {
-                    "learnings": learnings,
-                    "follow_up_questions": follow_up_questions
-                }
-                
-            except (json.JSONDecodeError, KeyError) as e:
-                print(f"Could not parse JSON for result processing: {e}")
-                # Try to extract directly from text
-                learnings = []
-                questions = []
-                
-                # Try to extract learnings
-                learnings_section = re.search(r'Learnings:(.*?)(?:Follow-up Questions:|$)', output_text, re.DOTALL | re.IGNORECASE)
-                if learnings_section:
-                    learnings = re.findall(r'\d+\.\s+(.*?)(?=\d+\.|\n\n|$)', learnings_section.group(1), re.DOTALL)
-                    learnings = [l.strip() for l in learnings if l.strip()]
-                
-                # Try to extract questions
-                questions_section = re.search(r'Follow-up Questions:(.*?)(?:\n\n|$)', output_text, re.DOTALL | re.IGNORECASE)
-                if questions_section:
-                    questions = re.findall(r'\d+\.\s+(.*?)(?=\d+\.|\n\n|$)', questions_section.group(1), re.DOTALL)
-                    questions = [q.strip() for q in questions if q.strip()]
-                
-                # Use defaults if extraction failed
-                if not learnings:
-                    learnings = [f"Key information about {query}"]
-                if not questions:
-                    questions = [f"What are the most important aspects of {query}?"]
-                
-                print(f"Results from {query}:")
-                print(f"Learnings: {learnings}\n")
-                print(f"Follow up questions: {questions}\n")
-                
-                return {
-                    "learnings": learnings[:num_learnings],
-                    "follow_up_questions": questions[:num_follow_up_questions]
-                }
-            
-        except Exception as e:
-            print(f"Error processing search results: {e}")
-            
-            # Use default values
-            default_learnings = [f"Key information about {query}"]
-            default_questions = [f"What are the most important aspects of {query}?"]
-            
-            print(f"Using default learnings and questions for {query}")
-            
-            return {
-                "learnings": default_learnings,
-                "follow_up_questions": default_questions
-            }
-
-    def _are_queries_similar(self, query1: str, query2: str) -> bool:
-        """Helper method to check if two queries are semantically similar"""
-        user_prompt = f"""
-        Compare these two search queries and determine if they are semantically similar 
-        (i.e., would likely return similar search results or are asking about the same topic):
-
-        Query 1: {query1}
-        Query 2: {query2}
-
-        Consider:
-        1. Key concepts and entities
-        2. Intent of the queries
-        3. Scope and specificity
-        4. Core topic overlap
-
-        Only respond with true if the queries are notably similar, false otherwise.
-        
-        Your response should be in JSON format as follows:
-        {{
-          "are_similar": true or false
-        }}
-        """
-
-        # Define messages for the model provider
-        messages = [
-            {"role": "system", "content": "You determine whether search queries are semantically similar."},
-            {"role": "user", "content": user_prompt}
-        ]
-
-        try:
-            # Make the API call through our model provider
-            response = self.model_provider.completion(
-                model=self.model_name,
-                messages=messages,
-                temperature=0.1,  # Low temperature for more consistent results
-                max_tokens=1024
-            )
-
-            # Extract and parse the response
-            json_response = json.loads(response.choices[0].message.content)
-            return QuerySimilarityResponse(**json_response).are_similar
-            
-        except Exception as e:
-            print(f"Error checking query similarity: {e}")
-            # In case of error, assume queries are different to avoid missing potentially unique results
-            return False
+        return await self.query_analyzer.generate_follow_up_questions(query, max_questions)
 
     async def deep_research(self, query: str, breadth: int, depth: int, learnings: list[str] = [], visited_urls: dict[int, dict] = {}, parent_query: str = None):
         """
@@ -656,21 +110,17 @@ class DeepSearch:
         # Start the root query
         progress.start_query(query, depth, parent_query)
 
-        # Adjust number of queries based on mode
-        max_queries = {
-            "fast": 3,
-            "balanced": 7,
-            "comprehensive": 5 # kept lower than balanced due to recursive multiplication
-        }[self.mode]
+        # Calculate number of queries based on research mode and breadth
+        num_queries = min(breadth, self.mode_config.max_queries)
 
-        queries = self.generate_queries(
+        # Generate search queries
+        queries = await self.query_generator.generate_queries(
             query,
-            min(breadth, max_queries),
-            learnings,
-            previous_queries=self.query_history
+            num_queries=num_queries,
+            learnings=learnings,
+            temperature=self.mode_config.temperature
         )
 
-        self.query_history.update(queries)
         unique_queries = list(queries)[:breadth]
 
         async def process_query(query_str: str, current_depth: int, parent: str = None):
@@ -678,8 +128,11 @@ class DeepSearch:
                 # Start this query as a sub-query of the parent
                 progress.start_query(query_str, current_depth, parent)
 
-                result = self.search(query_str)
-                processed_result = await self.process_result(
+                # Perform search
+                result = await self.search_service.search(query_str)
+                
+                # Process results
+                processed_result = await self.result_processor.process_result(
                     query=query_str,
                     result=result[0],
                     num_learnings=min(3, math.ceil(breadth / 2)),
@@ -690,6 +143,7 @@ class DeepSearch:
                 for learning in processed_result["learnings"]:
                     progress.add_learning(query_str, current_depth, learning)
 
+                # Update visited URLs
                 new_urls = result[1]
                 max_idx = max(visited_urls.keys()) if visited_urls else -1
                 all_urls = {
@@ -697,10 +151,10 @@ class DeepSearch:
                     **{(i + max_idx + 1): url_data for i, url_data in new_urls.items()}
                 }
 
-                # Only go deeper if in comprehensive mode and depth > 1
-                if self.mode == "comprehensive" and current_depth > 1:
+                # Only go deeper if recursion is allowed and depth > 1
+                if self.mode_config.allow_recursion and current_depth > 1:
                     # Reduced breadth for deeper levels
-                    new_breadth = min(2, math.ceil(breadth / 2))
+                    new_breadth = min(2, math.ceil(breadth * self.mode_config.breadth_reduction_factor))
                     new_depth = current_depth - 1
 
                     # Select most important follow-up question instead of using all
@@ -740,14 +194,15 @@ class DeepSearch:
             for learning in result["learnings"]
         ))
 
+        # Deduplicate URLs
         all_urls = {}
         current_idx = 0
         seen_urls = set()
         for result in results:
             for url_data in result["visited_urls"].values():
-                if url_data['link'] not in seen_urls:
+                if url_data.get('link', '') not in seen_urls:
                     all_urls[current_idx] = url_data
-                    seen_urls.add(url_data['link'])
+                    seen_urls.add(url_data.get('link', ''))
                     current_idx += 1
 
         # Complete the root query after all sub-queries are done
@@ -762,7 +217,7 @@ class DeepSearch:
             "visited_urls": all_urls
         }
 
-    def generate_final_report(self, query: str, learnings: list[str], visited_urls: dict[int, dict]) -> str:
+    async def generate_final_report(self, query: str, learnings: list[str], visited_urls: dict[int, dict]) -> str:
         """
         Generate a final comprehensive research report based on collected learnings
         
@@ -774,112 +229,9 @@ class DeepSearch:
         Returns:
             Formatted report text with sources
         """
-        # Format sources and learnings for the prompt
-        sources_text = "\n".join([
-            f"- {data['title']}: {data['link']}"
-            for data in visited_urls.values()
-        ])
-        learnings_text = "\n".join([f"- {learning}" for learning in learnings])
-
-        user_prompt = f"""
-        You are a creative research analyst tasked with synthesizing findings into an engaging and informative report.
-        Create a comprehensive research report (minimum 3000 words) based on the following query and findings.
-        
-        Original Query: {query}
-        
-        Key Findings:
-        {learnings_text}
-        
-        Sources Used:
-        {sources_text}
-        
-        Guidelines:
-        1. Design a creative and engaging report structure that best fits the content and topic
-        2. Feel free to use any combination of:
-           - Storytelling elements
-           - Case studies
-           - Scenarios
-           - Visual descriptions
-           - Analogies and metaphors
-           - Creative section headings
-           - Thought experiments
-           - Future projections
-           - Historical parallels
-        3. Make the report engaging while maintaining professionalism
-        4. Include all relevant data points but present them in an interesting way
-        5. Structure the information in whatever way makes the most logical sense for this specific topic
-        6. Feel free to break conventional report formats if a different approach would be more effective
-        7. Consider using creative elements like:
-           - "What if" scenarios
-           - Day-in-the-life examples
-           - Before/After comparisons
-           - Expert perspectives
-           - Trend timelines
-           - Problem-solution frameworks
-           - Impact matrices
-        
-        Requirements:
-        - Minimum 3000 words
-        - Must include all key findings and data points
-        - Must maintain factual accuracy
-        - Must be well-organized and easy to follow
-        - Must include clear conclusions and insights
-        - Must cite sources appropriately
-        
-        Be bold and creative in your approach while ensuring the report effectively communicates all the important information\!
-        """
-
-        # Define messages for the model provider
-        messages = [
-            {"role": "system", "content": "You are a creative research analyst that synthesizes findings into engaging reports."},
-            {"role": "user", "content": user_prompt}
-        ]
-
-        print("Generating final report...\n")
-
-        try:
-            # Make the API call through our model provider
-            response = self.model_provider.completion(
-                model=self.model_name,
-                messages=messages,
-                temperature=0.9,  # Increased for more creativity
-                max_tokens=8192
-            )
-            
-            # Extract the response text
-            if hasattr(response, 'choices') and len(response.choices) > 0 and hasattr(response.choices[0], 'message'):
-                formatted_text = response.choices[0].message.content
-            else:
-                # Fallback to string conversion for any other response type
-                formatted_text = str(response)
-                    
-            # If no response, use a default message
-            if not formatted_text:
-                formatted_text = f"Error: No content generated for report on {query}."
-                
-            print(f"Final report content (first 500 chars):\n{formatted_text[:500]}...")
-            
-        except Exception as e:
-            print(f"Error generating final report: {e}")
-            
-            # Use basic placeholder text
-            formatted_text = f"""
-# Report on {query}
-
-## Summary
-This is a placeholder report. The report generation experienced technical difficulties.
-
-## Key Findings
-{learnings_text}
-
-## Conclusion
-Please try regenerating this report or consider refining your query.
-"""
-
-        # Add sources section
-        sources_section = "\n# Sources\n" + "\n".join([
-            f"- [{data['title']}]({data['link']})"
-            for data in visited_urls.values()
-        ])
-
-        return formatted_text + sources_section
+        return await self.report_generator.generate_final_report(
+            query=query,
+            learnings=learnings,
+            visited_urls=visited_urls,
+            temperature=self.mode_config.report_temperature
+        )
