@@ -1,6 +1,7 @@
 from typing import Dict, List, Any, Tuple
 
 from ..models.provider import ModelProvider
+from ..prompts import system_prompts, user_prompts
 
 class SearchService:
     """Service for performing search operations"""
@@ -32,10 +33,13 @@ class SearchService:
             return self.cache[query]
             
         try:
+            # Get the prompt from the externalized prompts module
+            user_prompt = user_prompts.search_prompt(query)
+            
             # Create system and user messages
             messages = [
-                {"role": "system", "content": "You are a helpful assistant that provides comprehensive research information on topics. Please provide detailed and accurate information about the following query, including relevant facts, figures, dates, and analysis."},
-                {"role": "user", "content": f"Please research and provide detailed information about: {query}"}
+                {"role": "system", "content": system_prompts.SEARCH_ASSISTANT},
+                {"role": "user", "content": user_prompt}
             ]
             
             # Make the API call through our model provider

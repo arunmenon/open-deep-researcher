@@ -4,6 +4,7 @@ import re
 from ..models.provider import ModelProvider
 from ..utils.response_parser import ResponseParser
 from ..utils.response_models import ProcessResultResponse
+from ..prompts import system_prompts, user_prompts
 
 class ResultProcessor:
     """Service for processing search results"""
@@ -32,30 +33,13 @@ class ResultProcessor:
         """
         print(f"Processing result for query: {query}")
 
-        user_prompt = f"""
-        Given the following result from a SERP search for the query <query>{query}</query>, generate a list of learnings from the result. Return a maximum of {num_learnings} learnings, but feel free to return less if the result is clear. Make sure each learning is unique and not similar to each other. The learnings should be concise and to the point, as detailed and information dense as possible. Make sure to include any entities like people, places, companies, products, things, etc in the learnings, as well as any exact metrics, numbers, or dates. The learnings will be used to research the topic further.
-        
-        Here is the result:
-        {result}
-        
-        Your response should be in JSON format as follows:
-        {{
-          "learnings": [
-            "Learning 1",
-            "Learning 2",
-            "Learning 3"
-          ],
-          "follow_up_questions": [
-            "Question 1?",
-            "Question 2?",
-            "Question 3?"
-          ]
-        }}
-        """
+        # Get the prompt from the externalized prompts module
+        user_prompt = user_prompts.process_result_prompt(
+            query, result, num_learnings, num_follow_up_questions)
 
         # Define messages for the model provider
         messages = [
-            {"role": "system", "content": "You extract key learnings and generate follow-up questions from search results."},
+            {"role": "system", "content": system_prompts.RESULT_PROCESSOR},
             {"role": "user", "content": user_prompt}
         ]
 

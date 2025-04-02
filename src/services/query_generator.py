@@ -3,6 +3,7 @@ import re
 from ..models.provider import ModelProvider
 from ..utils.response_parser import ResponseParser
 from ..utils.response_models import QueriesResponse, QuerySimilarityResponse
+from ..prompts import system_prompts, user_prompts
 
 class QueryGenerator:
     """Service for generating search queries"""
@@ -44,35 +45,18 @@ class QueryGenerator:
             previous_queries_text = "\n\nPreviously asked queries (avoid generating similar ones):\n" + \
                 "\n".join([f"- {q}" for q in previous_queries])
 
-        user_prompt = f"""
-        Given the following prompt from the user, generate a list of SERP queries to research the topic. Return a maximum
-        of {num_queries} queries, but feel free to return less if the original prompt is clear.
-
-        IMPORTANT: Each query must be unique and significantly different from both each other AND the previously asked queries.
-        Avoid semantic duplicates or queries that would likely return similar information.
-
-        Original prompt: <prompt>${query}</prompt>
-        {previous_queries_text}
-        
-        Your response should be in JSON format as follows:
-        {{
-          "queries": [
-            "Query 1",
-            "Query 2",
-            "Query 3"
-          ]
-        }}
-        """
-
+        # Format learnings for the prompt
         learnings_prompt = "" if not learnings else "\n\nHere are some learnings from previous research, use them to generate more specific queries: " + \
             "\n".join([f"- {learning}" for learning in learnings])
-            
-        full_prompt = user_prompt + learnings_prompt
+
+        # Get the prompt from the externalized prompts module
+        user_prompt = user_prompts.generate_queries_prompt(
+            query, num_queries, previous_queries_text, learnings_prompt)
 
         # Define messages for the model provider
         messages = [
-            {"role": "system", "content": "You are a research assistant that generates search queries for research topics."},
-            {"role": "user", "content": full_prompt}
+            {"role": "system", "content": system_prompts.QUERY_GENERATOR},
+            {"role": "user", "content": user_prompt}
         ]
 
         try:
@@ -130,30 +114,12 @@ class QueryGenerator:
     
     async def _are_queries_similar(self, query1: str, query2: str) -> bool:
         """Helper method to check if two queries are semantically similar"""
-        user_prompt = f"""
-        Compare these two search queries and determine if they are semantically similar 
-        (i.e., would likely return similar search results or are asking about the same topic):
-
-        Query 1: {query1}
-        Query 2: {query2}
-
-        Consider:
-        1. Key concepts and entities
-        2. Intent of the queries
-        3. Scope and specificity
-        4. Core topic overlap
-
-        Only respond with true if the queries are notably similar, false otherwise.
-        
-        Your response should be in JSON format as follows:
-        {{
-          "are_similar": true or false
-        }}
-        """
+        # Get the prompt from the externalized prompts module
+        user_prompt = user_prompts.query_similarity_prompt(query1, query2)
 
         # Define messages for the model provider
         messages = [
-            {"role": "system", "content": "You determine whether search queries are semantically similar."},
+            {"role": "system", "content": system_prompts.QUERY_SIMILARITY_CHECKER},
             {"role": "user", "content": user_prompt}
         ]
 

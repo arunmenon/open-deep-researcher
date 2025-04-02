@@ -2,6 +2,7 @@ from typing import List, Dict, Any
 from ..models.provider import ModelProvider
 from ..utils.response_parser import ResponseParser
 from ..utils.response_models import BreadthDepthResponse, FollowUpQueriesResponse
+from ..prompts import system_prompts, user_prompts
 
 class QueryAnalyzer:
     """Service for analyzing queries and generating follow-up questions"""
@@ -25,34 +26,12 @@ class QueryAnalyzer:
         Returns:
             BreadthDepthResponse with breadth (1-10), depth (1-5), and explanation
         """
-        user_prompt = f"""
-        You are a research planning assistant. Your task is to determine the appropriate breadth and depth for researching a topic defined by a user's query. Evaluate the query's complexity and scope, then recommend values on the following scales:
-
-        Breadth: Scale of 1 (very narrow) to 10 (extensive, multidisciplinary).
-        Depth: Scale of 1 (basic overview) to 5 (highly detailed, in-depth analysis).
-        Defaults:
-
-        Breadth: 4
-        Depth: 2
-        Note: More complex or "harder" questions should prompt higher ratings on one or both scales, reflecting the need for more extensive research and deeper analysis.
-
-        Response Format:
-        Output your recommendation in JSON format, including an explanation. For example:
-        ```json
-        {{
-            "breadth": 4,
-            "depth": 2,
-            "explanation": "The topic is moderately complex; a broad review is needed (breadth 4) with a basic depth analysis (depth 2)."
-        }}
-        ```
-
-        Here is the user's query:
-        <query>{query}</query>
-        """
+        # Get the prompt from the externalized prompts module
+        user_prompt = user_prompts.research_parameters_prompt(query)
 
         # Define messages for the model provider
         messages = [
-            {"role": "system", "content": "You are a research planning assistant that determines appropriate research parameters."},
+            {"role": "system", "content": system_prompts.RESEARCH_PLANNER},
             {"role": "user", "content": user_prompt}
         ]
 
@@ -101,24 +80,12 @@ class QueryAnalyzer:
         Returns:
             List of follow-up questions
         """
-        user_prompt = f"""
-        Given the following query from the user, ask some follow up questions to clarify the research direction.
-
-        Return a maximum of {max_questions} questions, but feel free to return less if the original query is clear: <query>{query}</query>
-        
-        Your response should be in JSON format as follows:
-        {{
-          "follow_up_queries": [
-            "Question 1?",
-            "Question 2?",
-            "Question 3?"
-          ]
-        }}
-        """
+        # Get the prompt from the externalized prompts module
+        user_prompt = user_prompts.follow_up_questions_prompt(query, max_questions)
 
         # Define messages for the model provider
         messages = [
-            {"role": "system", "content": "You are a research assistant that generates follow-up questions to clarify research direction."},
+            {"role": "system", "content": system_prompts.FOLLOW_UP_GENERATOR},
             {"role": "user", "content": user_prompt}
         ]
 

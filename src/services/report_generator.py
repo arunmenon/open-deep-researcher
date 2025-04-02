@@ -1,6 +1,7 @@
 from typing import Dict, List, Any
 
 from ..models.provider import ModelProvider
+from ..prompts import system_prompts, user_prompts
 
 class ReportGenerator:
     """Service for generating research reports"""
@@ -34,57 +35,13 @@ class ReportGenerator:
         ])
         learnings_text = "\n".join([f"- {learning}" for learning in learnings])
 
-        user_prompt = f"""
-        You are a creative research analyst tasked with synthesizing findings into an engaging and informative report.
-        Create a comprehensive research report (minimum 3000 words) based on the following query and findings.
-        
-        Original Query: {query}
-        
-        Key Findings:
-        {learnings_text}
-        
-        Sources Used:
-        {sources_text}
-        
-        Guidelines:
-        1. Design a creative and engaging report structure that best fits the content and topic
-        2. Feel free to use any combination of:
-           - Storytelling elements
-           - Case studies
-           - Scenarios
-           - Visual descriptions
-           - Analogies and metaphors
-           - Creative section headings
-           - Thought experiments
-           - Future projections
-           - Historical parallels
-        3. Make the report engaging while maintaining professionalism
-        4. Include all relevant data points but present them in an interesting way
-        5. Structure the information in whatever way makes the most logical sense for this specific topic
-        6. Feel free to break conventional report formats if a different approach would be more effective
-        7. Consider using creative elements like:
-           - "What if" scenarios
-           - Day-in-the-life examples
-           - Before/After comparisons
-           - Expert perspectives
-           - Trend timelines
-           - Problem-solution frameworks
-           - Impact matrices
-        
-        Requirements:
-        - Minimum 3000 words
-        - Must include all key findings and data points
-        - Must maintain factual accuracy
-        - Must be well-organized and easy to follow
-        - Must include clear conclusions and insights
-        - Must cite sources appropriately
-        
-        Be bold and creative in your approach while ensuring the report effectively communicates all the important information!
-        """
+        # Get the prompt from the externalized prompts module
+        user_prompt = user_prompts.generate_report_prompt(
+            query, learnings_text, sources_text)
 
         # Define messages for the model provider
         messages = [
-            {"role": "system", "content": "You are a creative research analyst that synthesizes findings into engaging reports."},
+            {"role": "system", "content": system_prompts.REPORT_GENERATOR},
             {"role": "user", "content": user_prompt}
         ]
 
