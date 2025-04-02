@@ -1,25 +1,23 @@
 from typing import Dict, List, Any, Tuple
 
-from ..models.provider import ModelProvider
+from ..models.strategy import ModelStrategy
 from ..prompts import system_prompts, user_prompts
 
 class SearchService:
     """Service for performing search operations"""
     
-    def __init__(self, model_provider: ModelProvider, model_name: str):
+    def __init__(self, model_strategy: ModelStrategy):
         """Initialize the search service
         
         Args:
-            model_provider: The model provider to use
-            model_name: The name of the model to use
+            model_strategy: The model strategy to use
         """
-        self.model_provider = model_provider
-        self.model_name = model_name
+        self.model_strategy = model_strategy
         # Add a simple in-memory cache
         self.cache = {}
     
     async def search(self, query: str) -> Tuple[str, Dict[str, Any]]:
-        """Perform a search using the model provider
+        """Perform a search using the model strategy
         
         Args:
             query: The search query
@@ -42,11 +40,10 @@ class SearchService:
                 {"role": "user", "content": user_prompt}
             ]
             
-            # Make the API call through our model provider
+            # Make the API call through our model strategy
             print(f"Performing search for query: {query}")
             
-            response = await self.model_provider.async_completion(
-                model=self.model_name,
+            response = await self.model_strategy.execute_completion(
                 messages=messages,
                 temperature=0.7,
                 max_tokens=4096

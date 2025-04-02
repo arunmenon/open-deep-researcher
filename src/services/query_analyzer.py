@@ -1,5 +1,5 @@
 from typing import List, Dict, Any
-from ..models.provider import ModelProvider
+from ..models.strategy import ModelStrategy
 from ..utils.response_parser import ResponseParser
 from ..utils.response_models import BreadthDepthResponse, FollowUpQueriesResponse
 from ..prompts import system_prompts, user_prompts
@@ -7,15 +7,13 @@ from ..prompts import system_prompts, user_prompts
 class QueryAnalyzer:
     """Service for analyzing queries and generating follow-up questions"""
     
-    def __init__(self, model_provider: ModelProvider, model_name: str):
+    def __init__(self, model_strategy: ModelStrategy):
         """Initialize the query analyzer
         
         Args:
-            model_provider: The model provider to use for analysis
-            model_name: The name of the model to use
+            model_strategy: The model strategy to use for analysis
         """
-        self.model_provider = model_provider
-        self.model_name = model_name
+        self.model_strategy = model_strategy
     
     async def determine_research_parameters(self, query: str) -> BreadthDepthResponse:
         """Determine appropriate research breadth and depth based on query complexity.
@@ -36,11 +34,10 @@ class QueryAnalyzer:
         ]
 
         try:
-            # Make the API call through our model provider
+            # Make the API call through our model strategy
             print("Determining research breadth and depth...")
             
-            response = await self.model_provider.async_completion(
-                model=self.model_name,
+            response = await self.model_strategy.execute_completion(
                 messages=messages,
                 temperature=0.7,
                 max_tokens=4096
@@ -90,11 +87,10 @@ class QueryAnalyzer:
         ]
 
         try:
-            # Make the API call through our model provider
+            # Make the API call through our model strategy
             print("Generating follow-up questions...")
             
-            response = await self.model_provider.async_completion(
-                model=self.model_name,
+            response = await self.model_strategy.execute_completion(
                 messages=messages,
                 temperature=1.0,
                 max_tokens=4096

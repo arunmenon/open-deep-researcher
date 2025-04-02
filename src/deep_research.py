@@ -12,6 +12,7 @@ from dotenv import load_dotenv
 from .utils.research_progress import ResearchProgress
 from .models.provider import ModelProvider
 from .models.runpod_provider import RunpodProvider
+from .models.strategy import ModelStrategy, ModelStrategyFactory, RunPodStrategy
 
 # Import services
 from .services.query_analyzer import QueryAnalyzer
@@ -27,7 +28,16 @@ load_dotenv()
 
 
 class DeepSearch:
-    def __init__(self, mode: str = "balanced", model_provider: ModelProvider = None, runpod_api_key: str = None, runpod_endpoint_id: str = None):
+    def __init__(
+        self, 
+        mode: str = "balanced", 
+        model_strategy: Optional[ModelStrategy] = None,
+        strategy_type: Optional[str] = None,
+        strategy_config: Optional[Dict[str, Any]] = None,
+        model_provider: Optional[ModelProvider] = None,
+        runpod_api_key: Optional[str] = None, 
+        runpod_endpoint_id: Optional[str] = None
+    ):
         """
         Initialize DeepSearch with a mode parameter:
         - "fast": Prioritizes speed (reduced breadth/depth, highest concurrency)
@@ -36,34 +46,54 @@ class DeepSearch:
 
         Args:
             mode: Research mode - fast, balanced, or comprehensive
-            model_provider: Custom model provider instance (if provided, runpod_api_key is ignored)
-            runpod_api_key: API key for RunPod
-            runpod_endpoint_id: Endpoint ID for RunPod
+            model_strategy: Optional ModelStrategy instance to use
+            strategy_type: Optional type of strategy to create
+            strategy_config: Optional configuration for strategy creation
+            model_provider: Optional legacy ModelProvider instance
+            runpod_api_key: Optional legacy RunPod API key
+            runpod_endpoint_id: Optional legacy RunPod endpoint ID
         """
-        # Set up the model provider
-        if model_provider:
-            self.model_provider = model_provider
+        # Set up the model strategy (preferred) or provider (legacy)
+        if model_strategy:
+            # Use provided strategy
+            self.model_strategy = model_strategy
+        elif strategy_type:
+            # Create strategy from type and config
+            self.model_strategy = ModelStrategyFactory.create_strategy(
+                strategy_type, 
+                strategy_config or {}
+            )
+        elif model_provider:
+            # Legacy: Wrap provider in strategy
+            from .models.strategy import ProviderModelStrategy
+            self.model_strategy = ProviderModelStrategy(
+                model_provider, 
+                "provider-model"
+            )
         else:
-            # Set up RunPod as the default provider
+            # Legacy: Create RunPod strategy from parameters
             self.runpod_api_key = runpod_api_key or os.getenv("RUNPOD_API_KEY")
             if not self.runpod_api_key:
                 raise ValueError("RunPod API key is required")
                 
             self.endpoint_id = runpod_endpoint_id or os.getenv("RUNPOD_ENDPOINT_ID", "w0oa6hyd2q40jw")
-            self.model_provider = RunpodProvider(self.runpod_api_key, self.endpoint_id)
+            self.model_strategy = RunPodStrategy(self.runpod_api_key, self.endpoint_id)
         
         # Get the research mode configuration
         self.mode_config = ResearchModes.get_mode_config(mode)
-        self.model_name = "runpod/mistral-24b-instruct"
         
-        # Initialize services
-        self.query_analyzer = QueryAnalyzer(self.model_provider, self.model_name)
-        self.query_generator = QueryGenerator(self.model_provider, self.model_name)
-        self.search_service = SearchService(self.model_provider, self.model_name)
-        self.result_processor = ResultProcessor(self.model_provider, self.model_name)
-        self.report_generator = ReportGenerator(self.model_provider, self.model_name)
+        # Initialize services with the model strategy
+        self._init_services()
         
-        print(f"Configured DeepSearch with {mode} mode")
+        print(f"Configured DeepSearch with {mode} mode using {type(self.model_strategy).__name__}")
+    
+    def _init_services(self):
+        """Initialize all service components with the model strategy"""
+        self.query_analyzer = QueryAnalyzer(self.model_strategy)
+        self.query_generator = QueryGenerator(self.model_strategy)
+        self.search_service = SearchService(self.model_strategy)
+        self.result_processor = ResultProcessor(self.model_strategy)
+        self.report_generator = ReportGenerator(self.model_strategy)
         
     async def determine_research_breadth_and_depth(self, query: str):
         """

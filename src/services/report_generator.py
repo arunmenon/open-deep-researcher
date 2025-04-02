@@ -1,20 +1,18 @@
 from typing import Dict, List, Any
 
-from ..models.provider import ModelProvider
+from ..models.strategy import ModelStrategy
 from ..prompts import system_prompts, user_prompts
 
 class ReportGenerator:
     """Service for generating research reports"""
     
-    def __init__(self, model_provider: ModelProvider, model_name: str):
+    def __init__(self, model_strategy: ModelStrategy):
         """Initialize the report generator
         
         Args:
-            model_provider: The model provider to use
-            model_name: The name of the model to use
+            model_strategy: The model strategy to use
         """
-        self.model_provider = model_provider
-        self.model_name = model_name
+        self.model_strategy = model_strategy
     
     async def generate_final_report(self, query: str, learnings: List[str], visited_urls: Dict[int, Dict], temperature: float = 0.9) -> str:
         """Generate a final comprehensive research report based on collected learnings
@@ -48,9 +46,8 @@ class ReportGenerator:
         print("Generating final report...\n")
 
         try:
-            # Make the API call through our model provider
-            response = await self.model_provider.async_completion(
-                model=self.model_name,
+            # Make the API call through our model strategy
+            response = await self.model_strategy.execute_completion(
                 messages=messages,
                 temperature=temperature,  # Increased for more creativity
                 max_tokens=8192

@@ -3,9 +3,10 @@ import asyncio
 import os
 import time
 
-from src.deep_research import DeepSearch
-
 from dotenv import load_dotenv
+
+from src.deep_research import DeepSearch
+from src.models.strategy import RunPodStrategy, ModelStrategyFactory
 
 # Load environment variables from .env file
 load_dotenv()
@@ -24,6 +25,8 @@ async def main():
                       help='RunPod API key (can also be set via RUNPOD_API_KEY environment variable)')
     parser.add_argument('--runpod-endpoint-id', type=str, default=None,
                       help='RunPod endpoint ID (can also be set via RUNPOD_ENDPOINT_ID environment variable)')
+    parser.add_argument('--model-provider', type=str, choices=['runpod'], default='runpod',
+                      help='Model provider to use (default: runpod)')
 
     args = parser.parse_args()
 
@@ -38,12 +41,24 @@ async def main():
     # Get RunPod endpoint ID either from args or environment
     runpod_endpoint_id = args.runpod_endpoint_id or os.getenv('RUNPOD_ENDPOINT_ID')
     
-    # Create DeepSearch instance with new modular approach
-    deep_search = DeepSearch(
-        mode=args.mode,
-        runpod_api_key=runpod_api_key,
-        runpod_endpoint_id=runpod_endpoint_id
-    )
+    # Create DeepSearch instance with the specified model provider
+    if args.model_provider == 'runpod':
+        # Create RunPod strategy configuration
+        strategy_config = {
+            "api_key": runpod_api_key,
+            "endpoint_id": runpod_endpoint_id
+        }
+        
+        # Initialize DeepSearch with RunPod strategy
+        deep_search = DeepSearch(
+            mode=args.mode,
+            strategy_type="runpod",
+            strategy_config=strategy_config
+        )
+    else:
+        # This should never happen due to the choices parameter in argparse,
+        # but it's here for future extensibility
+        raise ValueError(f"Unsupported model provider: {args.model_provider}")
 
     breadth_and_depth = await deep_search.determine_research_breadth_and_depth(
         args.query)

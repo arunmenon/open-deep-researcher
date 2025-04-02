@@ -1,6 +1,6 @@
 from typing import List, Dict, Set, Any
 import re
-from ..models.provider import ModelProvider
+from ..models.strategy import ModelStrategy
 from ..utils.response_parser import ResponseParser
 from ..utils.response_models import QueriesResponse, QuerySimilarityResponse
 from ..prompts import system_prompts, user_prompts
@@ -8,15 +8,13 @@ from ..prompts import system_prompts, user_prompts
 class QueryGenerator:
     """Service for generating search queries"""
     
-    def __init__(self, model_provider: ModelProvider, model_name: str):
+    def __init__(self, model_strategy: ModelStrategy):
         """Initialize the query generator
         
         Args:
-            model_provider: The model provider to use
-            model_name: The name of the model to use
+            model_strategy: The model strategy to use
         """
-        self.model_provider = model_provider
-        self.model_name = model_name
+        self.model_strategy = model_strategy
         self.query_history = set()
     
     async def generate_queries(
@@ -60,11 +58,10 @@ class QueryGenerator:
         ]
 
         try:
-            # Make the API call through our model provider
+            # Make the API call through our model strategy
             print("Generating search queries...")
             
-            response = await self.model_provider.async_completion(
-                model=self.model_name,
+            response = await self.model_strategy.execute_completion(
                 messages=messages,
                 temperature=temperature,
                 max_tokens=4096
@@ -124,9 +121,8 @@ class QueryGenerator:
         ]
 
         try:
-            # Make the API call through our model provider
-            response = await self.model_provider.async_completion(
-                model=self.model_name,
+            # Make the API call through our model strategy
+            response = await self.model_strategy.execute_completion(
                 messages=messages,
                 temperature=0.1,  # Low temperature for more consistent results
                 max_tokens=1024
