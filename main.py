@@ -3,29 +3,30 @@ import asyncio
 import os
 import time
 
-from src.deep_research import DeepSearch
-
 from dotenv import load_dotenv
+
+from src.deep_research import DeepSearch
+from src.models.strategy import RunPodStrategy, ModelStrategyFactory
 
 # Load environment variables from .env file
 load_dotenv()
 
 
-if __name__ == "__main__":
+async def main():
     parser = argparse.ArgumentParser(description='Run deep search queries')
     parser.add_argument('query', type=str, help='The search query')
     parser.add_argument('--mode', type=str, choices=['fast', 'balanced', 'comprehensive'],
-                        default='balanced', help='Research mode (default: balanced)')
+                      default='balanced', help='Research mode (default: balanced)')
     parser.add_argument('--num-queries', type=int, default=3,
-                        help='Number of queries to generate (default: 3)')
+                      help='Number of queries to generate (default: 3)')
     parser.add_argument('--learnings', nargs='*', default=[],
-                        help='List of previous learnings')
-    parser.add_argument('--use-mistral', action='store_true', 
-                        help='Use Mistral model hosted on RunPod (default: True)')
+                      help='List of previous learnings')
     parser.add_argument('--runpod-api-key', type=str, default=None,
-                        help='RunPod API key (can also be set via RUNPOD_API_KEY environment variable)')
-    parser.add_argument('--use-gemini', action='store_true',
-                        help='Use Gemini model instead of Mistral')
+                      help='RunPod API key (can also be set via RUNPOD_API_KEY environment variable)')
+    parser.add_argument('--runpod-endpoint-id', type=str, default=None,
+                      help='RunPod endpoint ID (can also be set via RUNPOD_ENDPOINT_ID environment variable)')
+    parser.add_argument('--model-provider', type=str, choices=['runpod'], default='runpod',
+                      help='Model provider to use (default: runpod)')
 
     args = parser.parse_args()
 
@@ -37,23 +38,32 @@ if __name__ == "__main__":
     if not runpod_api_key:
         raise ValueError("Please set RUNPOD_API_KEY environment variable")
     
-    # Force use of Mistral only
-    use_mistral = True
-    if args.use_gemini:
-        print("Warning: --use-gemini flag ignored as we're configured for RunPod only")
+    # Get RunPod endpoint ID either from args or environment
+    runpod_endpoint_id = args.runpod_endpoint_id or os.getenv('RUNPOD_ENDPOINT_ID')
     
-    # Pass None for Gemini API key since we're not using it
-    deep_search = DeepSearch(
-        api_key=None, 
-        mode=args.mode,
-        use_mistral=use_mistral,
-        runpod_api_key=runpod_api_key
-    )
+    # Create DeepSearch instance with the specified model provider
+    if args.model_provider == 'runpod':
+        # Create RunPod strategy configuration
+        strategy_config = {
+            "api_key": runpod_api_key,
+            "endpoint_id": runpod_endpoint_id
+        }
+        
+        # Initialize DeepSearch with RunPod strategy
+        deep_search = DeepSearch(
+            mode=args.mode,
+            strategy_type="runpod",
+            strategy_config=strategy_config
+        )
+    else:
+        # This should never happen due to the choices parameter in argparse,
+        # but it's here for future extensibility
+        raise ValueError(f"Unsupported model provider: {args.model_provider}")
 
-    breadth_and_depth = deep_search.determine_research_breadth_and_depth(
+    breadth_and_depth = await deep_search.determine_research_breadth_and_depth(
         args.query)
 
-    # The function now returns a BreadthDepthResponse object, not a dict
+    # The function returns a BreadthDepthResponse object
     breadth = breadth_and_depth.breadth
     depth = breadth_and_depth.depth
     explanation = breadth_and_depth.explanation
@@ -66,7 +76,7 @@ if __name__ == "__main__":
     print("To better understand your research needs, please answer these follow-up questions:")
 
     try:
-        follow_up_questions = deep_search.generate_follow_up_questions(args.query)
+        follow_up_questions = await deep_search.generate_follow_up_questions(args.query)
     except Exception as e:
         print(f"Error generating follow-up questions: {e}")
         follow_up_questions = [
@@ -113,16 +123,16 @@ if __name__ == "__main__":
     print("Starting research... \n")
 
     # Run the deep research
-    results = asyncio.run(deep_search.deep_research(
+    results = await deep_search.deep_research(
         query=combined_query,
         breadth=breadth,
         depth=depth,
         learnings=[],
         visited_urls={}
-    ))
+    )
 
     # Generate and print the final report
-    final_report = deep_search.generate_final_report(
+    final_report = await deep_search.generate_final_report(
         query=combined_query,
         learnings=results["learnings"],
         visited_urls=results["visited_urls"]
@@ -143,3 +153,7 @@ if __name__ == "__main__":
         f.write(final_report)
         f.write(
             f"\n\nTotal research time: {minutes} minutes and {seconds} seconds")
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
